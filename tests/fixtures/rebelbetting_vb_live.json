@@ -1,0 +1,32 @@
+{
+  "captured_at": "2026-03-09T10:16:00Z",
+  "page": "dashboard",
+  "url": "https://vb.rebelbetting.com/",
+  "document_title": "Value betting by RebelBetting",
+  "body_text": "25 value bets",
+  "interactive_snapshot": [
+    {
+      "tag": "A",
+      "text": "Filters"
+    }
+  ],
+  "links": [
+    "https://vb.rebelbetting.com/filters"
+  ],
+  "inputs": {
+    "search": ""
+  },
+  "visible_actions": [
+    "Filters"
+  ],
+  "resource_hosts": [
+    "vb.rebelbetting.com"
+  ],
+  "local_storage_keys": [
+    "Token"
+  ],
+  "screenshot_path": "screenshots/dashboard-20260309T101600Z.png",
+  "notes": [
+    "trial-mode"
+  ]
+}

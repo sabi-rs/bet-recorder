@@ -1,0 +1,31 @@
+{
+  "captured_at": "2026-03-09T10:16:00Z",
+  "page": "drops",
+  "url": "https://app.fairoddsterminal.com/pro#/drop",
+  "document_title": "Drops | FairOdds Terminal",
+  "body_text": "Positive Expected Value bets",
+  "interactive_snapshot": [
+    {
+      "tag": "BUTTON",
+      "text": "Verify"
+    }
+  ],
+  "links": [],
+  "inputs": {
+    "search": ""
+  },
+  "visible_actions": [
+    "Verify",
+    "Chart"
+  ],
+  "resource_hosts": [
+    "app.fairoddsterminal.com"
+  ],
+  "local_storage_keys": [
+    "fairodds:settings"
+  ],
+  "screenshot_path": "screenshots/drops-20260309T101600Z.png",
+  "notes": [
+    "drops-widget"
+  ]
+}

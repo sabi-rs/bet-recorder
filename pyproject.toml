@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bet-recorder"
+version = "0.1.0"
+description = "Personal recorder-first CLI for betting observations."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.16,<1",
+  "websockets>=15,<16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9",
+]
+
+[project.scripts]
+bet-recorder = "bet_recorder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bet_recorder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

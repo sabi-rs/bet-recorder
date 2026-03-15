@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bet_recorder.watcher_state import (  # noqa: E402
+  build_watcher_error_state,
   build_watcher_state,
   write_watcher_state,
 )
@@ -58,6 +59,46 @@ def test_build_watcher_state_marks_profit_and_stop_loss_readiness() -> None:
   assert state["decisions"][2]["status"] == "monitor_only"
 
 
+def test_build_watcher_state_prefers_live_back_odds_when_available() -> None:
+  state = build_watcher_state(
+    source="smarkets_exchange",
+    run_dir=Path("/tmp/smarkets-run"),
+    interval_seconds=5.0,
+    iteration=4,
+    snapshot={
+      "watch": {
+        "target_profit": 1.0,
+        "stop_loss": 1.0,
+        "watches": [
+          {
+            "contract": "Draw",
+            "market": "Full-time result",
+            "current_pnl_amount": 0.2,
+            "can_trade_out": True,
+            "current_back_odds": 4.8,
+            "profit_take_back_odds": 4.2,
+            "stop_loss_back_odds": 2.8,
+          },
+          {
+            "contract": "1 - 1",
+            "market": "Correct score",
+            "current_pnl_amount": 0.2,
+            "can_trade_out": True,
+            "current_back_odds": 5.2,
+            "profit_take_back_odds": 10.87,
+            "stop_loss_back_odds": 5.38,
+          },
+        ],
+      },
+    },
+    captured_at=datetime(2026, 3, 11, 12, 6, tzinfo=UTC),
+  )
+
+  assert state["decisions"][0]["status"] == "take_profit_ready"
+  assert state["decisions"][1]["status"] == "stop_loss_ready"
+  assert state["decisions"][0]["reason"] == "current_back_odds"
+
+
 def test_write_watcher_state_persists_latest_json(tmp_path: Path) -> None:
   output_path = tmp_path / "watcher-state.json"
 
@@ -75,3 +116,19 @@ def test_write_watcher_state_persists_latest_json(tmp_path: Path) -> None:
   persisted = json.loads(output_path.read_text())
   assert persisted["decision_count"] == 1
   assert persisted["decisions"][0]["contract"] == "Draw"
+
+
+def test_build_watcher_error_state_marks_worker_error() -> None:
+  state = build_watcher_error_state(
+    source="smarkets_exchange",
+    run_dir=Path("/tmp/smarkets-run"),
+    interval_seconds=5.0,
+    iteration=7,
+    captured_at=datetime(2026, 3, 11, 12, 7, tzinfo=UTC),
+    error='Agent-browser session "helium-copy" is on about:blank, not Smarkets open positions.',
+  )
+
+  assert state["worker"]["status"] == "error"
+  assert "about:blank" in state["worker"]["detail"]
+  assert state["decision_count"] == 0
+  assert state["watch"]["watch_count"] == 0

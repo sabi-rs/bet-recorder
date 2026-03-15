@@ -19,6 +19,9 @@ Current implemented scope:
 - Smarkets watch extraction and grouped trade-out thresholds
 - exchange-worker stdio commands for `operator-console`
 - long-running Smarkets watcher process with persisted `watcher-state.json`
+- canonical tracked-bet rows loaded from companion-leg input
+- deterministic exit recommendations over tracked bets plus live Smarkets positions
+- narrow Smarkets cash-out request scaffolding over the worker session
 
 ## Development
 
@@ -60,7 +63,10 @@ The current config shape is:
 - `run_dir` optional
 - `account_payload_path` optional
 - `open_bets_payload_path` optional
+- `companion_legs_path` optional
 - `agent_browser_session` optional
+- `hard_margin_call_profit_floor` optional
+- `warn_only_default` required boolean in the worker protocol (defaults to `true` when omitted)
 
 At least one of `positions_payload_path` or `run_dir` must be provided. When `run_dir` is used,
 the worker reads the latest `positions_snapshot` event from `events.jsonl`.
@@ -74,6 +80,12 @@ The worker snapshot can now include:
 - raw open positions
 - account stats
 - other open bets
+- tracked bets loaded from `companion_legs_path`
+- exit policy summary
+- exit recommendations
+
+The companion-leg file is the first static input path for the unified bet ledger. It lets the
+worker show all bets in one place before every bookmaker has a live watcher.
 
 The preferred path is a richer `open_positions` capture whose body text already contains account
 summary and visible open bets. The optional account/open-bets payload paths are still supported as
@@ -129,6 +141,35 @@ The watcher currently classifies each grouped lay as:
 The decision is based on grouped live `current_pnl_amount` versus the configured
 `target_profit` / `stop_loss`, while the state also preserves the precomputed profit-take and
 stop-loss back odds for operator reference.
+
+For tracked bets, the worker also computes deterministic exit recommendations using explicit
+worst-case P&L math from:
+- the live Smarkets lay position
+- the static companion legs
+- configured `target_profit` / `stop_loss`
+- optional `hard_margin_call_profit_floor`
+
+Current recommendation actions are:
+- `hold`
+- `warn`
+- `cash_out`
+
+The watcher loop now captures page state without taking a screenshot on every poll, which avoids
+repeated screenshot-triggered desktop portal activity during long-running sessions.
+
+## Smarkets Cash-Out Scaffold
+
+The worker protocol now includes `CashOutTrackedBet { bet_id }` as a narrow Smarkets-only action
+path.
+
+Current behavior:
+- validates that the tracked bet exists
+- validates that the recommendation is currently `cash_out` on `smarkets`
+- validates that the live session is on an actionable Smarkets open-positions page
+- refuses execution with an explicit error until a captured Smarkets trade-out submission contract
+  is implemented
+
+This keeps the action surface narrow while preserving the end-to-end transport path.
 
 ## Example Workflow
 

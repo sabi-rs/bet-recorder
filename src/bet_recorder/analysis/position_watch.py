@@ -69,6 +69,7 @@ def _build_watch(
     commission_rate=commission_rate,
     target_profit=-stop_loss,
   )
+  current_back_odds = _weighted_current_back_odds(grouped_positions)
 
   return {
     "contract": contract,
@@ -78,6 +79,7 @@ def _build_watch(
     "total_stake": total_stake,
     "total_liability": total_liability,
     "current_pnl_amount": sum(float(position["pnl_amount"]) for position in grouped_positions),
+    "current_back_odds": current_back_odds,
     "average_entry_lay_odds": weighted_entry_odds,
     "entry_implied_probability": 1 / weighted_entry_odds,
     "profit_take_back_odds": profit_take_back_odds,
@@ -85,3 +87,19 @@ def _build_watch(
     "stop_loss_back_odds": stop_loss_back_odds,
     "stop_loss_implied_probability": 1 / stop_loss_back_odds,
   }
+
+
+def _weighted_current_back_odds(grouped_positions: list[dict]) -> float | None:
+  positions_with_back_odds = [
+    position
+    for position in grouped_positions
+    if position.get("current_back_odds") is not None
+  ]
+  if not positions_with_back_odds:
+    return None
+
+  total_stake = sum(float(position["stake"]) for position in positions_with_back_odds)
+  return sum(
+    float(position["stake"]) * float(position["current_back_odds"])
+    for position in positions_with_back_odds
+  ) / total_stake

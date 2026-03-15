@@ -20,6 +20,7 @@ def test_build_smarkets_watch_plan_groups_duplicate_lays_and_solves_thresholds()
         "pnl_amount": -0.09,
         "pnl_percent": 3.53,
         "status": "Order filled",
+        "current_back_odds": 10.87,
         "can_trade_out": True,
       },
       {
@@ -33,6 +34,7 @@ def test_build_smarkets_watch_plan_groups_duplicate_lays_and_solves_thresholds()
         "pnl_amount": -0.09,
         "pnl_percent": 22.05,
         "status": "Order filled",
+        "current_back_odds": 10.87,
         "can_trade_out": True,
       },
       {
@@ -46,6 +48,7 @@ def test_build_smarkets_watch_plan_groups_duplicate_lays_and_solves_thresholds()
         "pnl_amount": -0.31,
         "pnl_percent": 3.13,
         "status": "Order filled",
+        "current_back_odds": 2.80,
         "can_trade_out": True,
       },
     ],
@@ -63,6 +66,7 @@ def test_build_smarkets_watch_plan_groups_duplicate_lays_and_solves_thresholds()
   assert one_one["position_count"] == 2
   assert round(one_one["total_stake"], 2) == 2.96
   assert round(one_one["total_liability"], 2) == 18.34
+  assert round(one_one["current_back_odds"], 2) == 10.87
   assert round(one_one["profit_take_back_odds"], 2) == 10.87
   assert round(one_one["stop_loss_back_odds"], 2) == 5.38
 
@@ -70,5 +74,6 @@ def test_build_smarkets_watch_plan_groups_duplicate_lays_and_solves_thresholds()
   assert draw["contract"] == "Draw"
   assert draw["market"] == "Full-time result"
   assert draw["position_count"] == 1
+  assert round(draw["current_back_odds"], 2) == 2.80
   assert round(draw["profit_take_back_odds"], 2) == 3.73
   assert round(draw["stop_loss_back_odds"], 2) == 3.04

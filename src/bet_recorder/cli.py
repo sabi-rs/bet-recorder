@@ -14,6 +14,8 @@ from bet_recorder.capture.run_bundle import (
 )
 from bet_recorder.browser.agent_browser import AgentBrowserClient
 from bet_recorder.browser.cdp import DEFAULT_DEBUG_BASE_URL
+from bet_recorder.analysis.bet365 import analyze_bet365_page
+from bet_recorder.analysis.betuk import analyze_betuk_page
 from bet_recorder.analysis.betway_uk import analyze_betway_page
 from bet_recorder.analysis.position_watch import build_smarkets_watch_plan
 from bet_recorder.analysis.smarkets_exchange import analyze_smarkets_page
@@ -69,7 +71,21 @@ def extract_page(
     """Run source-specific extraction against a captured page payload."""
     payload = json.loads(payload_path.read_text())
 
-    if source == "betway_uk":
+    if source == "bet365":
+        analysis = analyze_bet365_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "betuk":
+        analysis = analyze_betuk_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "betway_uk":
         analysis = analyze_betway_page(
             page=payload["page"],
             body_text=payload["body_text"],

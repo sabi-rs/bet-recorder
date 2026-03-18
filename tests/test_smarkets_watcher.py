@@ -17,6 +17,7 @@ from bet_recorder.watcher import (  # noqa: E402
     _next_poll_interval_seconds,
     _with_navigation_retry,
     acquire_watcher_process_slot,
+    capture_current_smarkets_open_positions,
     bootstrap_smarkets_page,
     build_session_diagnostics,
     ensure_smarkets_authenticated,
@@ -294,6 +295,29 @@ def test_build_session_diagnostics_treats_portfolio_as_ready() -> None:
 
     assert diagnostics["page_hint"] == "open_positions"
     assert diagnostics["open_positions_ready"] is True
+
+
+def test_build_session_diagnostics_flags_portfolio_error_overlay() -> None:
+    diagnostics = build_session_diagnostics(
+        {
+            "url": "https://smarkets.com/portfolio/?order-state=active",
+            "document_title": "Smarkets Predictions",
+            "body_text": "Something went wrong\nTry Again\nWed",
+            "visible_actions": ["Try Again"],
+            "interactive_snapshot": [{"ref": "e1", "role": "button", "name": "Try Again"}],
+        },
+        WatcherConfig(
+            run_dir=Path("/tmp/smarkets-run"),
+            session="helium-copy",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+    )
+
+    assert diagnostics["page_hint"] == "error"
+    assert diagnostics["open_positions_ready"] is False
 
 
 def test_build_session_diagnostics_flags_login_redirect() -> None:
@@ -605,6 +629,106 @@ def test_run_smarkets_watcher_uses_persistent_profile_backend(
     assert state["worker"]["status"] == "ready"
     assert ("open_url", "https://smarkets.com/portfolio/") in calls
     assert ("capture_page_state", "open_positions") in calls
+
+
+def test_capture_current_smarkets_open_positions_retries_try_again_overlay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str | int]] = []
+    payloads = [
+        {
+            "captured_at": "2026-03-18T06:36:33Z",
+            "source": "smarkets_exchange",
+            "kind": "positions_snapshot",
+            "page": "open_positions",
+            "url": "https://smarkets.com/portfolio/?order-state=active",
+            "document_title": "Smarkets Predictions",
+            "body_text": "Something went wrong\nTry Again\nWed",
+            "interactive_snapshot": [{"ref": "e1", "role": "button", "name": "Try Again"}],
+            "links": [],
+            "inputs": {},
+            "visible_actions": ["Try Again"],
+            "resource_hosts": ["smarkets.com"],
+            "local_storage_keys": [],
+            "screenshot_path": None,
+            "notes": ["watcher-loop"],
+        },
+        {
+            "captured_at": "2026-03-18T06:36:35Z",
+            "source": "smarkets_exchange",
+            "kind": "positions_snapshot",
+            "page": "open_positions",
+            "url": "https://smarkets.com/portfolio/?order-state=active",
+            "document_title": "Smarkets Predictions",
+            "body_text": (
+                "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
+                "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open "
+                "Lazio vs Sassuolo "
+                "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£1.31 (3.13%) "
+                "Order filled Trade out"
+            ),
+            "interactive_snapshot": [],
+            "links": [],
+            "inputs": {},
+            "visible_actions": ["Trade out"],
+            "resource_hosts": ["smarkets.com"],
+            "local_storage_keys": [],
+            "screenshot_path": None,
+            "notes": ["watcher-loop", "retry-after-error"],
+        },
+    ]
+
+    class FakeClient:
+        def current_url(self) -> str:
+            calls.append(("current_url", "https://smarkets.com/portfolio/?order-state=active"))
+            return "https://smarkets.com/portfolio/?order-state=active"
+
+        def open_url(self, url: str) -> None:
+            calls.append(("open_url", url))
+
+        def wait(self, milliseconds: int) -> None:
+            calls.append(("wait", milliseconds))
+
+        def evaluate(self, script: str):
+            if "Try Again" in script:
+                calls.append(("eval-try-again", "Try Again"))
+                return True
+            calls.append(("eval", "other"))
+            return False
+
+    def fake_capture_agent_browser_page_state(**_: object):
+        return payloads.pop(0)
+
+    monkeypatch.setattr(
+        "bet_recorder.watcher.capture_agent_browser_page_state",
+        fake_capture_agent_browser_page_state,
+    )
+    monkeypatch.setattr("bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None)
+    monkeypatch.setattr(
+        "bet_recorder.watcher.ensure_smarkets_activity_filter", lambda *, client: None
+    )
+
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+
+    payload = capture_current_smarkets_open_positions(
+        WatcherConfig(
+            run_dir=run_dir,
+            session="helium-copy",
+            profile_path=tmp_path / "owned-profile",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+        datetime(2026, 3, 18, 6, 36, 33, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert payload["body_text"].startswith("Available balance")
+    assert payload["notes"] == ["watcher-loop", "retry-after-error"]
+    assert ("eval-try-again", "Try Again") in calls
 
 
 def test_capture_event_summaries_uses_cache_between_fast_live_polls() -> None:

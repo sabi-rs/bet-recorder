@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from bet_recorder.browser.cdp import DebugTarget
 from bet_recorder.cli import app
 from bet_recorder.exchange_worker import (
     WorkerConfig,
@@ -977,6 +978,140 @@ def test_load_exchange_snapshot_surfaces_watcher_error_state(
     assert "about:blank" in snapshot["status_line"]
     assert snapshot["venues"][0]["status"] == "error"
     assert snapshot["runtime"]["source"] == "watcher-state"
+
+
+def test_load_exchange_snapshot_supports_bet365_live_browser_payload(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_live_venue_payload",
+        lambda venue: {
+            "page": "my_bets",
+            "url": "https://www.bet365.com/#/MB/UB",
+            "document_title": "bet365 My Bets",
+            "body_text": (
+                "All Sports\nIn-Play\nMy Bets\n1\nOpen\nCash Out\nLive\nSettled\n"
+                "£10.00\nSingle\nBrumbies\nReuse Selections\nBrumbies\n3.10\nTo Win\n"
+                "Brumbies\nFri 20 Mar\nChiefs\n08:35\nStake\n£10.00\n"
+                "£10.00 Bet Credits\nNet Return\n£21.00"
+            ),
+            "inputs": {},
+            "visible_actions": ["My Bets", "Cash Out"],
+            "captured_at": "2026-03-18T08:15:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.list_debug_targets",
+        lambda: [
+            DebugTarget(
+                target_id="bet365-live",
+                target_type="page",
+                title="bet365 My Bets",
+                url="https://www.bet365.com/#/MB/UB",
+                websocket_debugger_url="ws://example.invalid/bet365",
+            )
+        ],
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=Path("/tmp/unused-positions.json"),
+            run_dir=None,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        selected_venue="bet365",
+    )
+
+    assert snapshot["selected_venue"] == "bet365"
+    assert snapshot["worker"]["status"] == "ready"
+    assert snapshot["other_open_bets"][0]["label"] == "Brumbies"
+    assert snapshot["other_open_bets"][0]["odds"] == 3.1
+    assert snapshot["venues"][1]["id"] == "bet365"
+    assert snapshot["venues"][1]["status"] == "ready"
+
+
+def test_handle_worker_request_line_persists_selected_live_venue(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_live_venue_payload",
+        lambda venue: {
+            "page": "my_bets",
+            "url": "https://www.bet365.com/#/MB/UB",
+            "document_title": "bet365 My Bets",
+            "body_text": "+0\nMy Bets\n",
+            "inputs": {},
+            "visible_actions": ["My Bets"],
+            "captured_at": "2026-03-18T08:15:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.list_debug_targets",
+        lambda: [
+            DebugTarget(
+                target_id="bet365-live",
+                target_type="page",
+                title="bet365 My Bets",
+                url="https://www.bet365.com/#/MB/UB",
+                websocket_debugger_url="ws://example.invalid/bet365",
+            )
+        ],
+    )
+    config = WorkerConfig(
+        positions_payload_path=Path("/tmp/unused-positions.json"),
+        run_dir=None,
+        account_payload_path=None,
+        open_bets_payload_path=None,
+        companion_legs_path=None,
+        commission_rate=0.0,
+        target_profit=1.0,
+        stop_loss=1.0,
+        hard_margin_call_profit_floor=None,
+        warn_only_default=True,
+        agent_browser_session=None,
+    )
+
+    response, next_config, next_selected_venue = handle_worker_request_line(
+        request_line=json.dumps({"SelectVenue": {"venue": "bet365"}}),
+        config=config,
+        selected_venue="smarkets",
+    )
+
+    assert next_config == config
+    assert next_selected_venue == "bet365"
+    assert response["snapshot"]["selected_venue"] == "bet365"
+
+
+def test_load_exchange_snapshot_handles_missing_live_tab_gracefully() -> None:
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=Path("/tmp/unused-positions.json"),
+            run_dir=None,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        selected_venue="betfred",
+    )
+
+    assert snapshot["selected_venue"] == "betfred"
+    assert snapshot["other_open_bets"] == []
+    assert snapshot["worker"]["status"] == "error"
+    assert "Could not find a CDP target" in snapshot["status_line"]
 
 
 def fixture_text(name: str) -> str:

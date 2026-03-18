@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from bet_recorder.capture.action_snapshot import ActionSnapshot, append_action_snapshot
+from bet_recorder.capture.page_snapshot import PageSnapshot, append_page_snapshot
 from bet_recorder.capture.run_bundle import RunBundle
 from bet_recorder.capture.watch_snapshot import WatchSnapshot, append_watch_snapshot
 from bet_recorder.sources.betway_uk import BetwayPageCapture, capture_betway_page
@@ -50,6 +51,16 @@ def record_live_page(*, source: str, bundle: RunBundle, payload: dict) -> None:
     capture_betway_page(
       bundle,
       BetwayPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
+    )
+  elif source in {"bet365", "betuk", "betfred", "betdaq"}:
+    append_page_snapshot(
+      bundle.events_path,
+      PageSnapshot(
+        source=source,
+        kind=_generic_page_kind(payload["page"]),
+        captured_at=captured_at,
+        **_common_payload_kwargs(payload),
+      ),
     )
   elif source == "smarkets_exchange":
     capture_smarkets_exchange_page(
@@ -126,3 +137,13 @@ def _common_payload_kwargs(payload: dict) -> dict:
     "screenshot_path": payload["screenshot_path"],
     "notes": payload["notes"],
   }
+
+
+def _generic_page_kind(page: str) -> str:
+  if page in {"my_bets", "open_positions"}:
+    return "positions_snapshot"
+  if page == "settlement":
+    return "settlement_snapshot"
+  if page == "market":
+    return "market_snapshot"
+  raise ValueError(f"Unsupported generic page kind: {page}")

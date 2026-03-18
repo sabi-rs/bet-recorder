@@ -24,3 +24,20 @@ def test_analyze_betway_betslip_extracts_core_builder_fields() -> None:
   assert analysis["stake"] == 10.0
   assert analysis["free_bet"] is True
   assert analysis["can_place_bet"] is True
+
+
+def test_analyze_betway_my_bets_detects_login_required_state() -> None:
+  analysis = analyze_betway_page(
+    page="my_bets",
+    body_text=(
+      "My Bets is empty Please login to view your bets. "
+      "Login Help Betting Rules Cash Out"
+    ),
+    inputs={},
+    visible_actions=["Login", "Help", "Cash Out"],
+  )
+
+  assert analysis["page"] == "my_bets"
+  assert analysis["status"] == "login_required"
+  assert analysis["open_bet_count"] == 0
+  assert analysis["supports_cash_out"] is True

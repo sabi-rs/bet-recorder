@@ -178,6 +178,13 @@ def capture_current_smarkets_open_positions(
         ),
         client=client,
     )
+    if _payload_has_retryable_smarkets_error(payload):
+        payload = _retry_smarkets_error_overlay_capture(
+            client=client,
+            bundle=bundle,
+            captured_at=captured_at,
+            original_payload=payload,
+        )
     try:
         positions_analysis = analyze_positions_payload(payload)
     except Exception:
@@ -191,6 +198,56 @@ def capture_current_smarkets_open_positions(
         sidecar_session=_event_summary_session_name(config.session),
     )
     return payload
+
+
+def _retry_smarkets_error_overlay_capture(
+    *, client, bundle, captured_at: datetime, original_payload: dict
+) -> dict:
+    payload: dict | None = None
+    for _ in range(2):
+        if not _click_smarkets_try_again(client=client):
+            break
+        _with_navigation_retry(lambda: accept_smarkets_cookies(client=client), client=client)
+        _with_navigation_retry(
+            lambda: ensure_smarkets_activity_filter(client=client), client=client
+        )
+        payload = _with_navigation_retry(
+            lambda: capture_agent_browser_page_state(
+                source="smarkets_exchange",
+                bundle=bundle,
+                page="open_positions",
+                captured_at=captured_at,
+                client=client,
+                notes=["watcher-loop", "retry-after-error"],
+            ),
+            client=client,
+        )
+        if not _payload_has_retryable_smarkets_error(payload):
+            return payload
+    return payload or original_payload
+
+
+def _click_smarkets_try_again(*, client) -> bool:
+    evaluate = getattr(client, "evaluate", None)
+    if not callable(evaluate):
+        return False
+
+    clicked = evaluate(
+        "(() => {"
+        "const button = Array.from(document.querySelectorAll('button, [role=\"button\"]')).find((element) => {"
+        "const text = (element.innerText || element.textContent || '').trim();"
+        "return text === 'Try Again';"
+        "});"
+        "if (!(button instanceof HTMLElement)) {"
+        "return false;"
+        "}"
+        "button.click();"
+        "return true;"
+        "})()"
+    )
+    if clicked:
+        client.wait(1500)
+    return bool(clicked)
 
 
 def bootstrap_smarkets_page(*, client, profile_path: Path | None) -> None:
@@ -473,6 +530,10 @@ def build_session_diagnostics(
         )
     ):
         page_hint = "login"
+    elif _payload_has_retryable_smarkets_error(
+        {"body_text": body_text, "visible_actions": visible_actions}
+    ):
+        page_hint = "error"
     elif (
         "open-positions" in current_url
         or current_url.startswith("https://smarkets.com/portfolio")
@@ -511,7 +572,20 @@ def _format_session_not_ready_error(session: dict) -> str:
             + " agent-browser sessions are isolated and do not inherit cookies from "
             + "your main browser session."
         )
+    if session.get("page_hint") == "error":
+        return message + " Smarkets returned an in-app error state; retry the portfolio view."
     return message
+
+
+def _payload_has_retryable_smarkets_error(payload: dict | None) -> bool:
+    if payload is None:
+        return False
+    body_text = str(payload.get("body_text", "") or "").lower()
+    visible_actions = [
+        str(action).strip().lower()
+        for action in (payload.get("visible_actions") or [])
+    ]
+    return "something went wrong" in body_text and "try again" in visible_actions
 
 
 def _utc_now() -> datetime:

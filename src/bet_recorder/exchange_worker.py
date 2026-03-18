@@ -6,10 +6,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 import json
 
+from bet_recorder.analysis.bet365 import analyze_bet365_page
+from bet_recorder.analysis.betuk import analyze_betuk_page
+from bet_recorder.analysis.betway_uk import analyze_betway_page
 from bet_recorder.analysis.position_watch import build_smarkets_watch_plan
 from bet_recorder.actions.smarkets_cashout import handle_cash_out_tracked_bet
 from bet_recorder.analysis.smarkets_exchange import analyze_smarkets_page
 from bet_recorder.browser.agent_browser import AgentBrowserClient
+from bet_recorder.browser.cdp import (
+    capture_debug_target_page_state,
+    list_debug_targets,
+    select_debug_target_by_fragments,
+)
 from bet_recorder.capture.run_bundle import load_run_bundle
 from bet_recorder.ledger.loader import load_tracked_bets
 from bet_recorder.ledger.policy import build_exit_recommendations
@@ -23,6 +31,55 @@ HISTORICAL_POSITION_ACTIVITY_TYPES = {
     "exchange_settlement",
     "market_settled",
     "cash_out",
+}
+DEFAULT_SELECTED_VENUE = "smarkets"
+
+
+@dataclass(frozen=True)
+class LiveVenueDefinition:
+    venue: str
+    label: str
+    source: str
+    page: str
+    url_fragments: tuple[str, ...]
+
+
+LIVE_VENUE_DEFINITIONS = {
+    "bet365": LiveVenueDefinition(
+        venue="bet365",
+        label="bet365",
+        source="bet365",
+        page="my_bets",
+        url_fragments=("bet365.com/#/MB/UB", "bet365.com"),
+    ),
+    "betuk": LiveVenueDefinition(
+        venue="betuk",
+        label="BetUK",
+        source="betuk",
+        page="my_bets",
+        url_fragments=("betuk.com",),
+    ),
+    "betway": LiveVenueDefinition(
+        venue="betway",
+        label="Betway",
+        source="betway_uk",
+        page="my_bets",
+        url_fragments=("betway.com/gb/en/sports/my-bets", "betway.com"),
+    ),
+    "betfred": LiveVenueDefinition(
+        venue="betfred",
+        label="Betfred",
+        source="betfred",
+        page="my_bets",
+        url_fragments=("betfred.com",),
+    ),
+    "betdaq": LiveVenueDefinition(
+        venue="betdaq",
+        label="Betdaq",
+        source="betdaq",
+        page="open_positions",
+        url_fragments=("betdaq.com",),
+    ),
 }
 
 
@@ -190,8 +247,91 @@ def capture_current_smarkets_open_positions(config: WorkerConfig) -> None:
     )
 
 
+def capture_current_live_venue_payload(venue: str) -> dict:
+    definition = LIVE_VENUE_DEFINITIONS.get(venue)
+    if definition is None:
+        raise ValueError(f"Unsupported live venue: {venue}")
+    targets = list_debug_targets()
+    target = select_debug_target_by_fragments(
+        targets=targets,
+        url_fragments=definition.url_fragments,
+    )
+    return capture_debug_target_page_state(
+        websocket_debugger_url=target.websocket_debugger_url,
+        page=definition.page,
+        captured_at=datetime.now(UTC),
+        notes=[f"exchange-worker-live:{venue}"],
+    )
+
+
+def analyze_live_venue_payload(venue: str, payload: dict) -> dict:
+    if venue == "bet365":
+        return analyze_bet365_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "betuk":
+        return analyze_betuk_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "betway":
+        return analyze_betway_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue in {"betfred", "betdaq"}:
+        return analyze_generic_live_venue_page(
+            venue=venue,
+            page=payload["page"],
+            body_text=payload["body_text"],
+            visible_actions=payload.get("visible_actions", []),
+        )
+    raise ValueError(f"Unsupported live venue analysis: {venue}")
+
+
+def analyze_generic_live_venue_page(
+    *,
+    venue: str,
+    page: str,
+    body_text: str,
+    visible_actions: list[str],
+) -> dict:
+    lower_body = body_text.lower()
+    if "log in" in lower_body or "login" in lower_body:
+        status = "login_required"
+    elif "my bets is empty" in lower_body or "no bets" in lower_body:
+        status = "no_open_bets"
+    else:
+        status = "unknown"
+    return {
+        "page": page,
+        "venue": venue,
+        "status": status,
+        "open_bets": [],
+        "open_bet_count": 0,
+        "supports_cash_out": any(action.lower() == "cash out" for action in visible_actions),
+    }
+
+
 def build_exchange_panel_snapshot(watch: dict) -> dict:
     unique_market_count = len({row["market"] for row in watch["watches"]})
+    venues = build_live_venue_summaries(
+        selected_venue="smarkets",
+        selected_status="ready",
+    )
+    if venues:
+        venues[0]["event_count"] = watch["watch_count"]
+        venues[0]["market_count"] = unique_market_count
+        venues[0]["detail"] = (
+            f"{watch['watch_count']} grouped watches across {unique_market_count} markets"
+        )
     return {
         "worker": {
             "name": "bet-recorder",
@@ -200,16 +340,7 @@ def build_exchange_panel_snapshot(watch: dict) -> dict:
                 f"Loaded {watch['watch_count']} watch groups from {watch['position_count']} positions."
             ),
         },
-        "venues": [
-            {
-                "id": "smarkets",
-                "label": "Smarkets",
-                "status": "ready",
-                "detail": f"{watch['watch_count']} grouped watches across {unique_market_count} markets",
-                "event_count": watch["watch_count"],
-                "market_count": unique_market_count,
-            },
-        ],
+        "venues": venues,
         "selected_venue": "smarkets",
         "events": [
             {
@@ -247,6 +378,295 @@ def build_exchange_panel_snapshot(watch: dict) -> dict:
         ),
         "exit_recommendations": [],
     }
+
+
+def build_live_venue_snapshot(
+    *,
+    venue: str,
+    payload: dict,
+    analysis: dict,
+    config: WorkerConfig,
+) -> dict:
+    definition = LIVE_VENUE_DEFINITIONS[venue]
+    open_bets = analysis.get("open_bets") or []
+    status = str(analysis.get("status") or "unknown")
+    venue_status = "ready" if status in {"ready", "no_open_bets"} else "error"
+    count_hint = analysis.get("count_hint")
+    event_count = len(open_bets)
+    if event_count == 0 and isinstance(count_hint, int):
+        event_count = count_hint
+    markets = _build_live_venue_markets(open_bets)
+    snapshot = {
+        "worker": {
+            "name": "bet-recorder",
+            "status": "ready" if venue_status == "ready" else "error",
+            "detail": _live_venue_status_line(
+                definition=definition,
+                status=status,
+                open_bets=open_bets,
+                count_hint=count_hint,
+            ),
+        },
+        "venues": build_live_venue_summaries(selected_venue=venue, selected_status=status),
+        "selected_venue": venue,
+        "events": [
+            {
+                "id": f"{venue}::{index}",
+                "label": str(row.get("label", "")),
+                "competition": str(row.get("event", "") or row.get("market", "")),
+                "start_time": str(row.get("status", "")),
+                "url": str(payload.get("url", "")),
+            }
+            for index, row in enumerate(open_bets)
+        ],
+        "markets": markets,
+        "preflight": None,
+        "status_line": _live_venue_status_line(
+            definition=definition,
+            status=status,
+            open_bets=open_bets,
+            count_hint=count_hint,
+        ),
+        "runtime": {
+            "updated_at": str(payload.get("captured_at", "")),
+            "source": f"{definition.source}:{definition.page}",
+            "decision_count": 0,
+            "watcher_iteration": None,
+            "stale": False,
+            "session": {
+                "name": None,
+                "current_url": str(payload.get("url", "")),
+                "document_title": str(payload.get("document_title", "")),
+                "page_hint": definition.page,
+                "open_positions_ready": status in {"ready", "no_open_bets"},
+                "validation_error": None
+                if status in {"ready", "no_open_bets"}
+                else _live_venue_status_line(
+                    definition=definition,
+                    status=status,
+                    open_bets=open_bets,
+                    count_hint=count_hint,
+                ),
+            },
+        },
+        "account_stats": None,
+        "open_positions": [],
+        "historical_positions": load_historical_positions(),
+        "other_open_bets": [
+            {
+                "label": str(row.get("label", "")),
+                "market": str(row.get("market", "")),
+                "side": str(row.get("side", "back")),
+                "odds": float(row.get("odds", 0.0)),
+                "stake": float(row.get("stake", 0.0)),
+                "status": str(row.get("status", "open")),
+            }
+            for row in open_bets
+        ],
+        "decisions": [],
+        "watch": None,
+        "tracked_bets": load_tracked_bets(config.companion_legs_path),
+        "exit_policy": build_exit_policy_summary(
+            {"target_profit": 0.0, "stop_loss": 0.0},
+            hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
+            warn_only_default=config.warn_only_default,
+        ),
+        "exit_recommendations": [],
+    }
+    return snapshot
+
+
+def build_unavailable_live_venue_snapshot(
+    *,
+    venue: str,
+    detail: str,
+    config: WorkerConfig,
+) -> dict:
+    definition = LIVE_VENUE_DEFINITIONS[venue]
+    return {
+        "worker": {
+            "name": "bet-recorder",
+            "status": "error",
+            "detail": detail,
+        },
+        "venues": build_live_venue_summaries(
+            selected_venue=venue,
+            selected_status="unavailable",
+        ),
+        "selected_venue": venue,
+        "events": [],
+        "markets": [],
+        "preflight": None,
+        "status_line": detail,
+        "runtime": {
+            "updated_at": "",
+            "source": f"{definition.source}:{definition.page}",
+            "decision_count": 0,
+            "watcher_iteration": None,
+            "stale": False,
+            "session": {
+                "name": None,
+                "current_url": "",
+                "document_title": "",
+                "page_hint": definition.page,
+                "open_positions_ready": False,
+                "validation_error": detail,
+            },
+        },
+        "account_stats": None,
+        "open_positions": [],
+        "historical_positions": load_historical_positions(),
+        "other_open_bets": [],
+        "decisions": [],
+        "watch": None,
+        "tracked_bets": load_tracked_bets(config.companion_legs_path),
+        "exit_policy": build_exit_policy_summary(
+            {"target_profit": 0.0, "stop_loss": 0.0},
+            hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
+            warn_only_default=config.warn_only_default,
+        ),
+        "exit_recommendations": [],
+    }
+
+
+def build_live_venue_summaries(
+    *,
+    selected_venue: str | None,
+    selected_status: str | None = None,
+) -> list[dict]:
+    summaries = [
+        {
+            "id": "smarkets",
+            "label": "Smarkets",
+            "status": "ready" if selected_venue == "smarkets" else "connected",
+            "detail": (
+                "Recorder-backed exchange monitoring"
+                if selected_venue == "smarkets"
+                else "Available via watcher state"
+            ),
+            "event_count": 0,
+            "market_count": 0,
+        }
+    ]
+    try:
+        targets = list_debug_targets()
+    except Exception:
+        targets = []
+    for venue in ("bet365", "betdaq", "betfred", "betway", "betuk"):
+        definition = LIVE_VENUE_DEFINITIONS[venue]
+        target = _find_live_venue_target(targets=targets, venue=venue)
+        if target is None:
+            if venue == selected_venue and selected_status is not None:
+                summaries.append(
+                    {
+                        "id": venue,
+                        "label": definition.label,
+                        "status": (
+                            "ready"
+                            if selected_status in {"ready", "no_open_bets"}
+                            else "error"
+                        ),
+                        "detail": _selected_live_venue_detail(
+                            definition.label,
+                            selected_status,
+                        ),
+                        "event_count": 0,
+                        "market_count": 0,
+                    }
+                )
+                continue
+            summaries.append(
+                {
+                    "id": venue,
+                    "label": definition.label,
+                    "status": "planned",
+                    "detail": "No live browser tab detected",
+                    "event_count": 0,
+                    "market_count": 0,
+                }
+            )
+            continue
+        status = "connected"
+        detail = f"Live browser tab detected: {target.title or target.url}"
+        if venue == selected_venue:
+            status = "ready" if selected_status in {"ready", "no_open_bets"} else "error"
+            detail = _selected_live_venue_detail(definition.label, selected_status)
+        summaries.append(
+            {
+                "id": venue,
+                "label": definition.label,
+                "status": status,
+                "detail": detail,
+                "event_count": 0,
+                "market_count": 0,
+            }
+        )
+    return summaries
+
+
+def _selected_live_venue_detail(label: str, status: str | None) -> str:
+    if status == "ready":
+        return f"{label} open bets loaded from live browser tab"
+    if status == "no_open_bets":
+        return f"{label} live browser tab is connected with no open bets"
+    if status == "navigation_required":
+        return f"{label} live browser tab is connected but not on a bet history view"
+    if status == "login_required":
+        return f"{label} live browser tab requires login before bets can be read"
+    if status == "unavailable":
+        return f"{label} does not currently have a live browser tab available"
+    return f"{label} live browser tab is connected but not yet readable"
+
+
+def _live_venue_status_line(
+    *,
+    definition: LiveVenueDefinition,
+    status: str,
+    open_bets: list[dict],
+    count_hint: int | None,
+) -> str:
+    if status == "ready":
+        return f"Loaded {len(open_bets)} {definition.label} open bets from the live browser tab."
+    if status == "no_open_bets":
+        return f"{definition.label} is connected and currently has no open bets."
+    if status == "navigation_required":
+        return f"{definition.label} is connected but not currently on a bet history view."
+    if status == "login_required":
+        return f"{definition.label} requires login before live bets can be loaded."
+    if count_hint is not None:
+        return f"{definition.label} is connected but only exposed a count hint of {count_hint}."
+    return f"{definition.label} is connected but did not expose readable open bets."
+
+
+def _build_live_venue_markets(open_bets: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in open_bets:
+        market = str(row.get("market", "") or "Unknown")
+        counts[market] = counts.get(market, 0) + 1
+    return [
+        {
+            "name": market,
+            "contract_count": contract_count,
+        }
+        for market, contract_count in counts.items()
+    ]
+
+
+def _find_live_venue_target(
+    *,
+    targets: list,
+    venue: str,
+):
+    definition = LIVE_VENUE_DEFINITIONS.get(venue)
+    if definition is None:
+        return None
+    try:
+        return select_debug_target_by_fragments(
+            targets=targets,
+            url_fragments=definition.url_fragments,
+        )
+    except ValueError:
+        return None
 
 
 def build_exit_policy_summary(
@@ -362,8 +782,28 @@ def load_watcher_state(*, run_dir: Path | None) -> dict | None:
 
 
 def load_exchange_snapshot_for_config(
-    config: WorkerConfig, *, capture_live: bool = True
+    config: WorkerConfig,
+    *,
+    selected_venue: str = DEFAULT_SELECTED_VENUE,
+    capture_live: bool = True,
 ) -> dict:
+    if selected_venue != "smarkets":
+        try:
+            payload = capture_current_live_venue_payload(selected_venue)
+        except ValueError as exc:
+            return build_unavailable_live_venue_snapshot(
+                venue=selected_venue,
+                detail=str(exc),
+                config=config,
+            )
+        analysis = analyze_live_venue_payload(selected_venue, payload)
+        return build_live_venue_snapshot(
+            venue=selected_venue,
+            payload=payload,
+            analysis=analysis,
+            config=config,
+        )
+
     if capture_live:
         capture_current_smarkets_open_positions(config)
     watcher_state = load_watcher_state(run_dir=config.run_dir)
@@ -374,13 +814,17 @@ def load_exchange_snapshot_for_config(
                 "worker": worker,
                 "venues": [
                     {
-                        "id": "smarkets",
-                        "label": "Smarkets",
+                        **build_live_venue_summaries(
+                            selected_venue="smarkets",
+                            selected_status="error",
+                        )[0],
                         "status": "error",
                         "detail": str(worker.get("detail", "watcher error")),
-                        "event_count": 0,
-                        "market_count": 0,
                     },
+                    *build_live_venue_summaries(
+                        selected_venue="smarkets",
+                        selected_status="error",
+                    )[1:],
                 ],
                 "selected_venue": "smarkets",
                 "events": [],
@@ -781,7 +1225,9 @@ def handle_worker_request(
     *,
     request: str | dict,
     config: WorkerConfig | None,
-) -> tuple[dict, WorkerConfig]:
+    selected_venue: str | None = None,
+):
+    effective_selected_venue = selected_venue or DEFAULT_SELECTED_VENUE
     request_name, request_payload = parse_worker_request(request)
 
     if request_name == "LoadDashboard":
@@ -789,22 +1235,30 @@ def handle_worker_request(
             request_payload,
             config=config,
         )
-        return {
+        response = {
             "snapshot": load_exchange_snapshot_for_config(
                 resolved_config,
+                selected_venue=effective_selected_venue,
                 capture_live=True,
             )
-        }, resolved_config
+        }
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, effective_selected_venue
 
     resolved_config = require_worker_config(config, request_name)
 
     if request_name == "Refresh":
-        return {
+        response = {
             "snapshot": load_exchange_snapshot_for_config(
                 resolved_config,
-                capture_live=False,
+                selected_venue=effective_selected_venue,
+                capture_live=(effective_selected_venue != "smarkets"),
             )
-        }, resolved_config
+        }
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, effective_selected_venue
 
     if request_name == "SelectVenue":
         assert request_payload is not None
@@ -812,14 +1266,18 @@ def handle_worker_request(
             venue = request_payload["venue"]
         except KeyError as exc:
             raise ValueError("SelectVenue payload must include venue.") from exc
-        if venue != "smarkets":
+        if venue not in {"smarkets", *LIVE_VENUE_DEFINITIONS.keys()}:
             raise ValueError(f"Unsupported venue for recorder worker: {venue}")
-        return {
+        response = {
             "snapshot": load_exchange_snapshot_for_config(
                 resolved_config,
-                capture_live=False,
+                selected_venue=venue,
+                capture_live=(venue != "smarkets"),
             )
-        }, resolved_config
+        }
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, venue
 
     if request_name == "CashOutTrackedBet":
         assert request_payload is not None
@@ -829,11 +1287,15 @@ def handle_worker_request(
             raise ValueError("CashOutTrackedBet payload must include bet_id.") from exc
         snapshot = load_exchange_snapshot_for_config(
             resolved_config,
+            selected_venue=effective_selected_venue,
             capture_live=False,
         )
-        return {
+        response = {
             "snapshot": handle_cash_out_tracked_bet(snapshot=snapshot, bet_id=bet_id)
-        }, resolved_config
+        }
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, effective_selected_venue
 
     raise AssertionError(f"Unhandled worker request type: {request_name}")
 
@@ -842,8 +1304,11 @@ def handle_worker_request_line(
     *,
     request_line: str,
     config: WorkerConfig | None,
-) -> tuple[dict, WorkerConfig | None]:
+    selected_venue: str | None = None,
+):
+    effective_selected_venue = selected_venue or DEFAULT_SELECTED_VENUE
     next_config = config
+    next_selected_venue = effective_selected_venue
     try:
         request = json.loads(request_line)
         request_name, request_payload = parse_worker_request(request)
@@ -852,12 +1317,22 @@ def handle_worker_request_line(
                 request_payload,
                 config=config,
             )
+        if request_name == "SelectVenue" and request_payload is not None:
+            next_selected_venue = str(request_payload.get("venue") or next_selected_venue)
+        if selected_venue is None:
+            return handle_worker_request(
+                request=request,
+                config=config,
+            )
         return handle_worker_request(
             request=request,
             config=config,
+            selected_venue=effective_selected_venue,
         )
     except ValueError as exc:
-        return build_worker_request_error_response(str(exc)), next_config
+        if selected_venue is None:
+            return build_worker_request_error_response(str(exc)), next_config
+        return build_worker_request_error_response(str(exc)), next_config, next_selected_venue
 
 
 def iter_worker_session_responses(
@@ -865,13 +1340,15 @@ def iter_worker_session_responses(
     request_lines: Iterable[str],
 ) -> Iterator[dict]:
     config: WorkerConfig | None = None
+    selected_venue = DEFAULT_SELECTED_VENUE
     for request_line in request_lines:
         normalized_request_line = request_line.strip()
         if not normalized_request_line:
             continue
-        response, config = handle_worker_request_line(
+        response, config, selected_venue = handle_worker_request_line(
             request_line=normalized_request_line,
             config=config,
+            selected_venue=selected_venue,
         )
         yield response
 

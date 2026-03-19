@@ -187,6 +187,10 @@ def test_capture_live_page_cli_command_uses_fixture_payload(tmp_path: Path) -> N
     ("bet365", "my_bets", "positions_snapshot"),
     ("betuk", "market", "market_snapshot"),
     ("betfred", "my_bets", "positions_snapshot"),
+    ("coral", "my_bets", "positions_snapshot"),
+    ("ladbrokes", "my_bets", "positions_snapshot"),
+    ("kwik", "my_bets", "positions_snapshot"),
+    ("bet600", "my_bets", "positions_snapshot"),
     ("betdaq", "open_positions", "positions_snapshot"),
   ],
 )

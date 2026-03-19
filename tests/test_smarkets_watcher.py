@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from bet_recorder.browser.models import BrowserPageState  # noqa: E402
 from bet_recorder.watcher import (  # noqa: E402
     LIVE_EVENT_SUMMARY_REFRESH_SECONDS,
     LIVE_POLL_INTERVAL_SECONDS,
@@ -220,7 +221,7 @@ def test_bootstrap_smarkets_page_opens_portfolio_for_owned_profile() -> None:
 
     assert calls == [
         ("current_url", "about:blank"),
-        ("open_url", "https://smarkets.com/portfolio/"),
+        ("open_url", "https://smarkets.com/portfolio/?time=all&order-state=active"),
         ("wait", 1500),
     ]
 
@@ -246,7 +247,7 @@ def test_bootstrap_smarkets_page_opens_portfolio_for_blank_session_mode() -> Non
 
     assert calls == [
         ("current_url", "about:blank"),
-        ("open_url", "https://smarkets.com/portfolio/"),
+        ("open_url", "https://smarkets.com/portfolio/?time=all&order-state=active"),
         ("wait", 1500),
     ]
 
@@ -256,8 +257,11 @@ def test_bootstrap_smarkets_page_does_not_navigate_ready_session() -> None:
 
     class FakeClient:
         def current_url(self) -> str:
-            calls.append(("current_url", "https://smarkets.com/portfolio/"))
-            return "https://smarkets.com/portfolio/"
+            calls.append((
+                "current_url",
+                "https://smarkets.com/portfolio/?time=all&order-state=active",
+            ))
+            return "https://smarkets.com/portfolio/?time=all&order-state=active"
 
         def open_url(self, url: str) -> None:
             calls.append(("open_url", url))
@@ -270,13 +274,15 @@ def test_bootstrap_smarkets_page_does_not_navigate_ready_session() -> None:
         profile_path=None,
     )
 
-    assert calls == [("current_url", "https://smarkets.com/portfolio/")]
+    assert calls == [
+        ("current_url", "https://smarkets.com/portfolio/?time=all&order-state=active")
+    ]
 
 
 def test_build_session_diagnostics_treats_portfolio_as_ready() -> None:
     diagnostics = build_session_diagnostics(
         {
-            "url": "https://smarkets.com/portfolio/",
+            "url": "https://smarkets.com/portfolio/?time=all&order-state=active",
             "document_title": "Smarkets Predictions",
             "body_text": "Portfolio Trade out",
             "visible_actions": ["Trade out"],
@@ -395,7 +401,10 @@ def test_ensure_smarkets_authenticated_submits_login_when_credentials_exist(
         ("click", 'button[type="submit"]'),
         ("wait", 1500),
     ]
-    assert ("open_url", "https://smarkets.com/portfolio/") in calls
+    assert (
+        "open_url",
+        "https://smarkets.com/portfolio/?time=all&order-state=active",
+    ) in calls
 
 
 def test_with_navigation_retry_retries_execution_context_destroyed() -> None:
@@ -545,6 +554,7 @@ def test_ensure_smarkets_authenticated_prefers_visible_login_button_with_eval_pa
     eval_calls = [value for kind, value in calls if kind == "eval"]
     assert eval_calls
     assert "text === 'Log in' && !element.disabled" in eval_calls[0]
+    assert "form.requestSubmit(submit)" in eval_calls[0]
     assert ("open_url", "https://smarkets.com/portfolio/") not in calls
 
 
@@ -562,7 +572,7 @@ def test_run_smarkets_watcher_uses_persistent_profile_backend(
                 "source": "smarkets_exchange",
                 "kind": "positions_snapshot",
                 "page": "open_positions",
-                "url": "https://smarkets.com/portfolio/",
+                "url": "https://smarkets.com/portfolio/?time=all&order-state=active",
                 "document_title": "Open positions",
                 "body_text": (
                     "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
@@ -627,7 +637,10 @@ def test_run_smarkets_watcher_uses_persistent_profile_backend(
     )
 
     assert state["worker"]["status"] == "ready"
-    assert ("open_url", "https://smarkets.com/portfolio/") in calls
+    assert (
+        "open_url",
+        "https://smarkets.com/portfolio/?time=all&order-state=active",
+    ) in calls
     assert ("capture_page_state", "open_positions") in calls
 
 
@@ -729,6 +742,330 @@ def test_capture_current_smarkets_open_positions_retries_try_again_overlay(
     assert payload["body_text"].startswith("Available balance")
     assert payload["notes"] == ["watcher-loop", "retry-after-error"]
     assert ("eval-try-again", "Try Again") in calls
+
+
+def test_capture_current_smarkets_open_positions_merges_scroll_captured_rows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+
+    first_state = BrowserPageState(
+        captured_at=datetime(2026, 3, 19, 19, 13, tzinfo=UTC),
+        page="open_positions",
+        url="https://smarkets.com/portfolio/?order-state=active",
+        document_title="Smarkets Predictions",
+        body_text=(
+            "Portfolio\n"
+            "£72.44\n"
+            "Your balance\n"
+            "£21.75\n"
+            "Exposure\n"
+            "15:32 - Newbury\n"
+            "Tomorrow At 3:32 PM|Newbury\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell J J Moon\n"
+            "To win\n"
+            "7.2\n"
+            "£8.33\n"
+            "£51.64\n"
+            "£59.97\n"
+            "£7.57\n"
+            "-£0.76 (9.12%)\n"
+            "Order filled\n"
+            "Brumbies vs Chiefs\n"
+            "Tomorrow At 8:35 AM|Super Rugby\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Brumbies\n"
+            "Winner (including overtime)\n"
+            "3.0\n"
+            "£10.40\n"
+            "£20.80\n"
+            "£31.20\n"
+            "£7.23\n"
+            "-£3.17 (30.48%)\n"
+            "Order filled\n"
+            "Trade out\n"
+        ),
+        interactive_snapshot=[],
+        links=[],
+        inputs={},
+        visible_actions=["Trade out"],
+        resource_hosts=["smarkets.com"],
+        local_storage_keys=[],
+        screenshot_path=None,
+        notes=["watcher-loop"],
+        metadata={
+            "smarkets_portfolio": {
+                "extractor": "dom-v1",
+                "groups": [
+                    {
+                        "title": "15:32 - Newbury",
+                        "event_status": "Tomorrow At 3:32 PM|Newbury",
+                        "order_count": 1,
+                        "positions": [
+                            {
+                                "side": "sell",
+                                "contract": "J J Moon",
+                                "market": "To win",
+                                "price": 7.2,
+                                "stake": 8.33,
+                                "liability": 51.64,
+                                "return_amount": 59.97,
+                                "current_value": 7.57,
+                                "pnl_amount": -0.76,
+                                "pnl_percent": 9.12,
+                                "status": "Order filled",
+                            }
+                        ],
+                    }
+                ],
+                "positions": [
+                    {
+                        "side": "sell",
+                        "contract": "J J Moon",
+                        "market": "To win",
+                        "event": "15:32 - Newbury",
+                        "event_status": "Tomorrow At 3:32 PM|Newbury",
+                        "price": 7.2,
+                        "stake": 8.33,
+                        "liability": 51.64,
+                        "return_amount": 59.97,
+                        "current_value": 7.57,
+                        "pnl_amount": -0.76,
+                        "pnl_percent": 9.12,
+                        "status": "Order filled",
+                    },
+                    {
+                        "side": "sell",
+                        "contract": "Brumbies",
+                        "market": "Winner (including overtime)",
+                        "event": "Brumbies vs Chiefs",
+                        "event_status": "Tomorrow At 8:35 AM|Super Rugby",
+                        "price": 3.0,
+                        "stake": 10.40,
+                        "liability": 20.80,
+                        "return_amount": 31.20,
+                        "current_value": 7.23,
+                        "pnl_amount": -3.17,
+                        "pnl_percent": 30.48,
+                        "status": "Order filled",
+                    },
+                ],
+            }
+        },
+    )
+    second_state = BrowserPageState(
+        captured_at=datetime(2026, 3, 19, 19, 13, tzinfo=UTC),
+        page="open_positions",
+        url="https://smarkets.com/portfolio/?order-state=active",
+        document_title="Smarkets Predictions",
+        body_text=(
+            "Brumbies vs Chiefs\n"
+            "Tomorrow At 8:35 AM|Super Rugby\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Brumbies\n"
+            "Winner (including overtime)\n"
+            "3.0\n"
+            "£10.40\n"
+            "£20.80\n"
+            "£31.20\n"
+            "£7.23\n"
+            "-£3.17 (30.48%)\n"
+            "Order filled\n"
+            "Trade out\n"
+            "Lazio vs Sassuolo\n"
+            "Tomorrow At 10:00 PM|Serie A\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Draw\n"
+            "Full-time result\n"
+            "3.35\n"
+            "£9.91\n"
+            "£23.29\n"
+            "£33.20\n"
+            "£9.60\n"
+            "-£1.31 (3.13%)\n"
+            "Order filled\n"
+            "Trade out\n"
+        ),
+        interactive_snapshot=[],
+        links=[],
+        inputs={},
+        visible_actions=["Trade out"],
+        resource_hosts=["smarkets.com"],
+        local_storage_keys=[],
+        screenshot_path=None,
+        notes=["watcher-loop"],
+        metadata={
+            "smarkets_portfolio": {
+                "extractor": "dom-v1",
+                "groups": [
+                    {
+                        "title": "Lazio vs Sassuolo",
+                        "event_status": "Tomorrow At 10:00 PM|Serie A",
+                        "order_count": 1,
+                        "positions": [
+                            {
+                                "side": "sell",
+                                "contract": "Draw",
+                                "market": "Full-time result",
+                                "price": 3.35,
+                                "stake": 9.91,
+                                "liability": 23.29,
+                                "return_amount": 33.20,
+                                "current_value": 9.60,
+                                "pnl_amount": -1.31,
+                                "pnl_percent": 3.13,
+                                "status": "Order filled",
+                            }
+                        ],
+                    }
+                ],
+                "positions": [
+                    {
+                        "side": "sell",
+                        "contract": "Brumbies",
+                        "market": "Winner (including overtime)",
+                        "event": "Brumbies vs Chiefs",
+                        "event_status": "Tomorrow At 8:35 AM|Super Rugby",
+                        "price": 3.0,
+                        "stake": 10.40,
+                        "liability": 20.80,
+                        "return_amount": 31.20,
+                        "current_value": 7.23,
+                        "pnl_amount": -3.17,
+                        "pnl_percent": 30.48,
+                        "status": "Order filled",
+                    },
+                    {
+                        "side": "sell",
+                        "contract": "Draw",
+                        "market": "Full-time result",
+                        "event": "Lazio vs Sassuolo",
+                        "event_status": "Tomorrow At 10:00 PM|Serie A",
+                        "price": 3.35,
+                        "stake": 9.91,
+                        "liability": 23.29,
+                        "return_amount": 33.20,
+                        "current_value": 9.60,
+                        "pnl_amount": -1.31,
+                        "pnl_percent": 3.13,
+                        "status": "Order filled",
+                    },
+                ],
+            }
+        },
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.capture_calls = 0
+            self.scroll_calls = 0
+
+        def current_url(self) -> str:
+            return "https://smarkets.com/portfolio/?time=all&order-state=active"
+
+        def open_url(self, url: str) -> None:
+            raise AssertionError(f"unexpected open_url({url})")
+
+        def capture_page_state(self, **_: object) -> BrowserPageState:
+            self.capture_calls += 1
+            return first_state if self.capture_calls == 1 else second_state
+
+        def evaluate(self, script: str):
+            if "advanced" in script and "max_top" in script:
+                self.scroll_calls += 1
+                if self.scroll_calls == 1:
+                    return {"advanced": True, "at_end": True, "top": 720, "max_top": 720}
+                return {"advanced": False, "at_end": True, "top": 720, "max_top": 720}
+            return True
+
+        def wait(self, milliseconds: int) -> None:
+            assert milliseconds == 200
+
+    monkeypatch.setattr("bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None)
+    monkeypatch.setattr(
+        "bet_recorder.watcher.ensure_smarkets_activity_filter", lambda *, client: None
+    )
+    monkeypatch.setattr(
+        "bet_recorder.watcher._capture_event_summaries",
+        lambda **_: [],
+    )
+
+    payload = capture_current_smarkets_open_positions(
+        WatcherConfig(
+            run_dir=run_dir,
+            session="helium-copy",
+            profile_path=tmp_path / "owned-profile",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+        datetime(2026, 3, 19, 19, 13, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert payload["body_text"].count("Sell Brumbies") == 2
+    assert payload["notes"] == ["watcher-loop", "scroll-capture"]
+
+    events = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 1
+    assert events[0]["body_text"] == payload["body_text"]
+    assert len(events[0]["metadata"]["smarkets_portfolio"]["positions"]) == 3
+
+    positions = payload["event_summaries"]
+    assert positions == []
+
+    state = run_smarkets_watcher(
+        WatcherConfig(
+            run_dir=run_dir,
+            session="helium-copy",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+        capture_once=lambda *_: payload,
+        sleep=lambda _: None,
+        now=lambda: datetime(2026, 3, 19, 19, 13, tzinfo=UTC),
+        max_iterations=1,
+    )
+    assert len(state["open_positions"]) == 3
+    assert [position["contract"] for position in state["open_positions"]] == [
+        "J J Moon",
+        "Brumbies",
+        "Draw",
+    ]
 
 
 def test_capture_event_summaries_uses_cache_between_fast_live_polls() -> None:

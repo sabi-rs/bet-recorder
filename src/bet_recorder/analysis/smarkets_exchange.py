@@ -3,14 +3,28 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote, urlparse
 
-POSITION_RE = re.compile(
+SELL_POSITION_RE = re.compile(
     r"Sell\s+(?P<contract>.+?)\s+"
-    r"(?P<market>Correct score|Full-time result|To win)\s+"
+    r"(?P<market>Correct score|Full-time result|To win|Winner \(including overtime\))\s+"
     r"(?P<price>\d+(?:\.\d+)?)\s+"
     r"£(?P<stake>\d+(?:\.\d+)?)\s+"
     r"£(?P<liability>\d+(?:\.\d+)?)\s+"
     r"£(?P<return_amount>\d+(?:\.\d+)?)\s+"
-    r"£(?P<current_value>\d+(?:\.\d+)?)\s+"
+    r"(?P<current_value_sign>-?)£(?P<current_value>\d+(?:\.\d+)?)\s+"
+    r"(?P<pnl_sign>-?)£(?P<pnl_amount>\d+(?:\.\d+)?)\s+"
+    r"\((?P<pnl_percent>\d+(?:\.\d+)?)%\)\s+"
+    r"(?P<status>Order filled)"
+    r"(?:\s+(?P<trade_out_label>Trade out)"
+    r"(?:\s+Back\s+(?P<current_back_odds>\d+(?:\.\d+)?))?)?",
+    re.I,
+)
+BUY_POSITION_RE = re.compile(
+    r"Buy\s+(?P<contract>.+?)\s+"
+    r"(?P<market>Correct score|Full-time result|To win|Winner \(including overtime\))\s+"
+    r"(?P<price>\d+(?:\.\d+)?)\s+"
+    r"£(?P<stake>\d+(?:\.\d+)?)\s+"
+    r"£(?P<return_amount>\d+(?:\.\d+)?)\s+"
+    r"(?P<current_value_sign>-?)£(?P<current_value>\d+(?:\.\d+)?)\s+"
     r"(?P<pnl_sign>-?)£(?P<pnl_amount>\d+(?:\.\d+)?)\s+"
     r"\((?P<pnl_percent>\d+(?:\.\d+)?)%\)\s+"
     r"(?P<status>Order filled)"
@@ -54,7 +68,7 @@ SCHEDULED_EVENT_STATUS_RE = re.compile(
     re.I,
 )
 ENDED_EVENT_STATUS_RE = re.compile(r"^Event ended\b", re.I)
-MONEY_LINE_RE = re.compile(r"^£(?P<amount>\d+(?:\.\d+)?)$")
+MONEY_LINE_RE = re.compile(r"^(?P<sign>-?)£(?P<amount>\d+(?:\.\d+)?)$")
 PNL_LINE_RE = re.compile(
     r"^(?P<sign>[+-])£(?P<amount>\d+(?:\.\d+)?)\s+\((?P<percent>\d+(?:\.\d+)?)%\)$"
 )
@@ -80,27 +94,36 @@ def analyze_smarkets_page(
     visible_actions: list[str],
     links: list[str] | None = None,
     event_summaries: list[dict] | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     if page == "open_positions":
-        positions = _extract_structured_positions(body_text)
+        positions = _positions_from_metadata(metadata)
+        if not positions:
+            positions = _extract_structured_positions(body_text)
         if not positions:
             positions = [
-                _build_position(match, body_text=body_text)
-                for match in POSITION_RE.finditer(body_text)
+                _build_sell_position(match, body_text=body_text)
+                for match in SELL_POSITION_RE.finditer(body_text)
             ]
+            positions.extend(
+                _build_buy_position(match, body_text=body_text)
+                for match in BUY_POSITION_RE.finditer(body_text)
+            )
+        positions = _dedupe_positions(positions)
         positions = enrich_open_positions(
             positions,
             links=links or [],
             event_summaries=event_summaries or [],
+        )
+        other_open_bets = _dedupe_open_bets(
+            [_build_open_bet(match) for match in OPEN_BET_RE.finditer(body_text)]
         )
         return {
             "page": page,
             "position_count": len(positions),
             "positions": positions,
             "account_stats": _extract_account_stats(body_text),
-            "other_open_bets": [
-                _build_open_bet(match) for match in OPEN_BET_RE.finditer(body_text)
-            ],
+            "other_open_bets": other_open_bets,
             "can_trade_out": any(
                 action.lower() == "trade out" for action in visible_actions
             ),
@@ -114,10 +137,13 @@ def analyze_smarkets_page(
     }
 
 
-def _build_position(match: re.Match[str], *, body_text: str) -> dict:
+def _build_sell_position(match: re.Match[str], *, body_text: str) -> dict:
     pnl_amount = float(match.group("pnl_amount"))
     if match.group("pnl_sign") == "-":
         pnl_amount = -pnl_amount
+    current_value = float(match.group("current_value"))
+    if match.group("current_value_sign") == "-":
+        current_value = -current_value
 
     event = None
     event_status = None
@@ -135,10 +161,51 @@ def _build_position(match: re.Match[str], *, body_text: str) -> dict:
             event_status=event_status,
         ),
         "price": float(match.group("price")),
+        "side": "sell",
         "stake": float(match.group("stake")),
         "liability": float(match.group("liability")),
         "return_amount": float(match.group("return_amount")),
-        "current_value": float(match.group("current_value")),
+        "current_value": current_value,
+        "pnl_amount": pnl_amount,
+        "pnl_percent": float(match.group("pnl_percent")),
+        "status": match.group("status"),
+        "current_back_odds": (
+            float(match.group("current_back_odds"))
+            if match.group("current_back_odds") is not None
+            else None
+        ),
+        "can_trade_out": can_trade_out,
+    }
+
+
+def _build_buy_position(match: re.Match[str], *, body_text: str) -> dict:
+    pnl_amount = float(match.group("pnl_amount"))
+    if match.group("pnl_sign") == "-":
+        pnl_amount = -pnl_amount
+    current_value = float(match.group("current_value"))
+    if match.group("current_value_sign") == "-":
+        current_value = -current_value
+
+    event, event_status = _extract_event_context(body_text, match.start())
+    can_trade_out = match.group("trade_out_label") is not None
+    stake = float(match.group("stake"))
+
+    return {
+        "contract": match.group("contract").strip(),
+        "market": match.group("market").strip(),
+        "event": event,
+        "event_status": event_status,
+        "is_in_play": _event_status_is_live(event_status),
+        "market_status": _market_status(
+            can_trade_out=can_trade_out,
+            event_status=event_status,
+        ),
+        "price": float(match.group("price")),
+        "side": "buy",
+        "stake": stake,
+        "liability": stake,
+        "return_amount": float(match.group("return_amount")),
+        "current_value": current_value,
         "pnl_amount": pnl_amount,
         "pnl_percent": float(match.group("pnl_percent")),
         "status": match.group("status"),
@@ -157,50 +224,91 @@ def _extract_structured_positions(body_text: str) -> list[dict]:
 
     lines = [line.strip() for line in body_text.splitlines() if line.strip()]
     positions: list[dict] = []
-    for index, line in enumerate(lines):
-        if line != TABLE_HEADER[0]:
+    index = 0
+    while index < len(lines):
+        if _matches_table_header(lines, index=index):
+            header_positions, next_index = _parse_structured_positions_block(
+                lines,
+                header_index=index,
+            )
+            positions.extend(header_positions)
+            index = next_index
             continue
-        if tuple(lines[index : index + len(TABLE_HEADER)]) != TABLE_HEADER:
-            continue
-        row = _parse_structured_position(lines, header_index=index)
-        if row is not None:
-            positions.append(row)
+        index += 1
     return positions
 
 
-def _parse_structured_position(lines: list[str], *, header_index: int) -> dict | None:
+def _matches_table_header(lines: list[str], *, index: int) -> bool:
+    if index + len(TABLE_HEADER) > len(lines):
+        return False
+    return tuple(line.lower() for line in lines[index : index + len(TABLE_HEADER)]) == tuple(
+        header.lower() for header in TABLE_HEADER
+    )
+
+
+def _parse_structured_positions_block(
+    lines: list[str], *, header_index: int
+) -> tuple[list[dict], int]:
     row_index = header_index + len(TABLE_HEADER)
+    positions: list[dict] = []
+    event, event_status = _extract_event_context_from_lines(lines, header_index=header_index)
+
+    while row_index < len(lines):
+        contract_line = lines[row_index]
+        if contract_line.startswith("Sell "):
+            row, next_index = _parse_structured_sell_position(
+                lines,
+                row_index=row_index,
+                event=event,
+                event_status=event_status,
+            )
+        elif contract_line.startswith("Buy "):
+            row, next_index = _parse_structured_buy_position(
+                lines,
+                row_index=row_index,
+                event=event,
+                event_status=event_status,
+            )
+        else:
+            break
+
+        if row is None:
+            break
+        positions.append(row)
+        row_index = next_index
+
+    return positions, row_index
+
+
+def _parse_structured_sell_position(
+    lines: list[str],
+    *,
+    row_index: int,
+    event: str | None,
+    event_status: str | None,
+) -> tuple[dict | None, int]:
     required_index = row_index + 8
     if required_index >= len(lines):
-        return None
-    if not lines[row_index].startswith("Sell "):
-        return None
+        return None, row_index
 
     try:
         price = float(lines[row_index + 2])
         stake = _parse_money_line(lines[row_index + 3])
         liability = _parse_money_line(lines[row_index + 4])
         return_amount = _parse_money_line(lines[row_index + 5])
-        current_value = _parse_money_line(lines[row_index + 6])
+        current_value = _parse_money_line(lines[row_index + 6], allow_negative=True)
         pnl_amount, pnl_percent = _parse_pnl_line(lines[row_index + 7])
     except ValueError:
-        return None
+        return None, row_index
 
     status = lines[row_index + 8]
     if status != "Order filled":
-        return None
+        return None, row_index
 
-    trade_out_label = None
-    current_back_odds = None
-    next_index = row_index + 9
-    if next_index < len(lines) and lines[next_index] == "Trade out":
-        trade_out_label = "Trade out"
-        if next_index + 1 < len(lines):
-            back_odds_match = BACK_ODDS_LINE_RE.fullmatch(lines[next_index + 1])
-            if back_odds_match is not None:
-                current_back_odds = float(back_odds_match.group("odds"))
-
-    event, event_status = _extract_event_context_from_lines(lines, header_index=header_index)
+    trade_out_label, current_back_odds, next_index = _parse_trade_out_tail(
+        lines,
+        next_index=row_index + 9,
+    )
     can_trade_out = trade_out_label is not None
 
     return {
@@ -214,6 +322,7 @@ def _parse_structured_position(lines: list[str], *, header_index: int) -> dict |
             event_status=event_status,
         ),
         "price": price,
+        "side": "sell",
         "stake": stake,
         "liability": liability,
         "return_amount": return_amount,
@@ -223,7 +332,77 @@ def _parse_structured_position(lines: list[str], *, header_index: int) -> dict |
         "status": status,
         "current_back_odds": current_back_odds,
         "can_trade_out": can_trade_out,
-    }
+    }, next_index
+
+
+def _parse_structured_buy_position(
+    lines: list[str],
+    *,
+    row_index: int,
+    event: str | None,
+    event_status: str | None,
+) -> tuple[dict | None, int]:
+    required_index = row_index + 7
+    if required_index >= len(lines):
+        return None, row_index
+
+    try:
+        price = float(lines[row_index + 2])
+        stake = _parse_money_line(lines[row_index + 3])
+        return_amount = _parse_money_line(lines[row_index + 4])
+        current_value = _parse_money_line(lines[row_index + 5], allow_negative=True)
+        pnl_amount, pnl_percent = _parse_pnl_line(lines[row_index + 6])
+    except ValueError:
+        return None, row_index
+
+    status = lines[row_index + 7]
+    if status != "Order filled":
+        return None, row_index
+
+    trade_out_label, current_back_odds, next_index = _parse_trade_out_tail(
+        lines,
+        next_index=row_index + 8,
+    )
+    can_trade_out = trade_out_label is not None
+
+    return {
+        "contract": lines[row_index].removeprefix("Buy ").strip(),
+        "market": lines[row_index + 1],
+        "event": event,
+        "event_status": event_status,
+        "is_in_play": _event_status_is_live(event_status),
+        "market_status": _market_status(
+            can_trade_out=can_trade_out,
+            event_status=event_status,
+        ),
+        "price": price,
+        "side": "buy",
+        "stake": stake,
+        "liability": stake,
+        "return_amount": return_amount,
+        "current_value": current_value,
+        "pnl_amount": pnl_amount,
+        "pnl_percent": pnl_percent,
+        "status": status,
+        "current_back_odds": current_back_odds,
+        "can_trade_out": can_trade_out,
+    }, next_index
+
+
+def _parse_trade_out_tail(
+    lines: list[str], *, next_index: int
+) -> tuple[str | None, float | None, int]:
+    trade_out_label = None
+    current_back_odds = None
+    if next_index < len(lines) and lines[next_index] == "Trade out":
+        trade_out_label = "Trade out"
+        next_index += 1
+        if next_index < len(lines):
+            back_odds_match = BACK_ODDS_LINE_RE.fullmatch(lines[next_index])
+            if back_odds_match is not None:
+                current_back_odds = float(back_odds_match.group("odds"))
+                next_index += 1
+    return trade_out_label, current_back_odds, next_index
 
 
 def _extract_event_context_from_lines(
@@ -302,11 +481,14 @@ def _market_status(*, can_trade_out: bool, event_status: str | None) -> str:
     return "unavailable"
 
 
-def _parse_money_line(value: str) -> float:
+def _parse_money_line(value: str, *, allow_negative: bool = False) -> float:
     match = MONEY_LINE_RE.fullmatch(value.strip())
     if match is None:
         raise ValueError(f"Not a money line: {value!r}")
-    return float(match.group("amount"))
+    amount = float(match.group("amount"))
+    if allow_negative and match.group("sign") == "-":
+        amount = -amount
+    return amount
 
 
 def _parse_pnl_line(value: str) -> tuple[float, float]:
@@ -364,6 +546,110 @@ def _build_open_bet(match: re.Match[str]) -> dict:
         "stake": float(match.group("stake")),
         "status": match.group("status").strip(),
     }
+
+
+def _positions_from_metadata(metadata: dict | None) -> list[dict]:
+    if not isinstance(metadata, dict):
+        return []
+    portfolio = metadata.get("smarkets_portfolio")
+    if not isinstance(portfolio, dict):
+        return []
+
+    positions: list[dict] = []
+    for raw_position in portfolio.get("positions") or []:
+        if not isinstance(raw_position, dict):
+            continue
+        contract = str(raw_position.get("contract", "") or "").strip()
+        market = str(raw_position.get("market", "") or "").strip()
+        side = str(raw_position.get("side", "") or "").strip().lower()
+        if not contract or not market or side not in {"buy", "sell"}:
+            continue
+        position = {
+            "contract": contract,
+            "market": market,
+            "event": str(raw_position.get("event", "") or ""),
+            "event_status": str(raw_position.get("event_status", "") or ""),
+            "is_in_play": _event_status_is_live(
+                str(raw_position.get("event_status", "") or "")
+            ),
+            "market_status": _market_status(
+                can_trade_out=bool(raw_position.get("can_trade_out")),
+                event_status=str(raw_position.get("event_status", "") or ""),
+            ),
+            "price": _optional_float(raw_position.get("price")),
+            "side": side,
+            "stake": _optional_float(raw_position.get("stake")),
+            "liability": _optional_float(raw_position.get("liability")),
+            "return_amount": _optional_float(raw_position.get("return_amount")),
+            "current_value": _optional_float(raw_position.get("current_value")),
+            "pnl_amount": _optional_float(raw_position.get("pnl_amount")),
+            "pnl_percent": _optional_float(raw_position.get("pnl_percent")),
+            "status": str(raw_position.get("status", "") or ""),
+            "current_back_odds": _optional_float(
+                raw_position.get("current_back_odds")
+            ),
+            "can_trade_out": bool(raw_position.get("can_trade_out")),
+        }
+        required_keys = (
+            "price",
+            "stake",
+            "liability",
+            "return_amount",
+            "current_value",
+            "pnl_amount",
+            "pnl_percent",
+        )
+        if any(position[key] is None for key in required_keys):
+            return []
+        positions.append(position)
+    return positions
+
+
+def _optional_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _dedupe_positions(positions: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for position in positions:
+        key = (
+            str(position.get("contract", "") or ""),
+            str(position.get("market", "") or ""),
+            str(position.get("event", "") or ""),
+            str(position.get("event_status", "") or ""),
+            position.get("price"),
+            position.get("stake"),
+            position.get("liability"),
+            position.get("return_amount"),
+            str(position.get("status", "") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(position)
+    return deduped
+
+
+def _dedupe_open_bets(open_bets: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for open_bet in open_bets:
+        key = (
+            str(open_bet.get("label", "") or ""),
+            str(open_bet.get("market", "") or ""),
+            str(open_bet.get("side", "") or ""),
+            open_bet.get("odds"),
+            open_bet.get("stake"),
+            str(open_bet.get("status", "") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(open_bet)
+    return deduped
 
 
 def enrich_open_positions(

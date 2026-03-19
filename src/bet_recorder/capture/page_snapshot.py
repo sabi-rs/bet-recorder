@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 import json
@@ -23,6 +23,7 @@ class PageSnapshot:
   screenshot_path: str | None
   notes: list[str]
   captured_at: datetime
+  metadata: dict = field(default_factory=dict)
 
 
 def append_page_snapshot(events_path: Path, snapshot: PageSnapshot) -> None:
@@ -43,5 +44,7 @@ def append_page_snapshot(events_path: Path, snapshot: PageSnapshot) -> None:
     "screenshot_path": snapshot.screenshot_path,
     "notes": snapshot.notes,
   }
+  if snapshot.metadata:
+    event["metadata"] = snapshot.metadata
   with events_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(event) + "\n")

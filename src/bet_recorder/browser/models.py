@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,9 +28,10 @@ class BrowserPageState:
   local_storage_keys: list[str]
   screenshot_path: str | None
   notes: list[str]
+  metadata: dict[str, Any] = field(default_factory=dict)
 
   def to_payload(self) -> dict[str, Any]:
-    return {
+    payload = {
       "captured_at": _to_utc_z(self.captured_at),
       "page": self.page,
       "url": self.url,
@@ -45,6 +46,9 @@ class BrowserPageState:
       "screenshot_path": self.screenshot_path,
       "notes": self.notes,
     }
+    if self.metadata:
+      payload["metadata"] = self.metadata
+    return payload
 
 
 @dataclass(slots=True)

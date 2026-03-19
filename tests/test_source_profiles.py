@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bet_recorder.sources.profiles import get_source_profile  # noqa: E402
@@ -11,6 +13,17 @@ def test_bet365_profile_exposes_my_bets_page_without_transport() -> None:
 
   assert profile.source == "bet365"
   assert profile.supported_pages == ("my_bets",)
+  assert profile.transport_capture_default is False
+  assert profile.screenshot_required is True
+  assert profile.minimum_pages == ("my_bets",)
+
+
+@pytest.mark.parametrize("source", ["betfred", "coral", "ladbrokes", "kwik", "bet600"])
+def test_generic_sportsbook_profiles_expose_my_bets(source: str) -> None:
+  profile = get_source_profile(source)
+
+  assert profile.source == source
+  assert profile.supported_pages == ("my_bets", "market")
   assert profile.transport_capture_default is False
   assert profile.screenshot_required is True
   assert profile.minimum_pages == ("my_bets",)

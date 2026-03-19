@@ -29,6 +29,7 @@ class SmarketsExchangePageCapture:
   screenshot_path: str | None
   notes: list[str]
   captured_at: datetime
+  metadata: dict | None = None
 
 
 def capture_smarkets_exchange_page(
@@ -57,5 +58,6 @@ def capture_smarkets_exchange_page(
       screenshot_path=capture.screenshot_path,
       notes=capture.notes,
       captured_at=capture.captured_at,
+      metadata=capture.metadata or {},
     ),
   )

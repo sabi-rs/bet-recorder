@@ -22,7 +22,16 @@ def record_live_page(*, source: str, bundle: RunBundle, payload: dict) -> None:
       bundle,
       BetwayPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
     )
-  elif source in {"bet365", "betuk", "betfred", "betdaq"}:
+  elif source in {
+    "bet365",
+    "betuk",
+    "betfred",
+    "betdaq",
+    "coral",
+    "ladbrokes",
+    "kwik",
+    "bet600",
+  }:
     append_page_snapshot(
       bundle.events_path,
       PageSnapshot(
@@ -106,6 +115,7 @@ def _common_payload_kwargs(payload: dict) -> dict:
     "local_storage_keys": payload["local_storage_keys"],
     "screenshot_path": payload["screenshot_path"],
     "notes": payload["notes"],
+    "metadata": payload.get("metadata", {}),
   }
 
 

@@ -6,6 +6,7 @@ from tempfile import NamedTemporaryFile
 
 from bet_recorder.browser.agent_browser import AgentBrowserClient
 from bet_recorder.browser.adapter import build_action_payload
+from bet_recorder.browser.models import BrowserPageState
 from bet_recorder.capture.run_bundle import RunBundle
 from bet_recorder.capture.screenshots import write_screenshot
 from bet_recorder.live.runner import record_live_action, record_live_page
@@ -54,12 +55,26 @@ def capture_agent_browser_page_state(
     client: AgentBrowserClient,
     notes: list[str] | None = None,
 ) -> dict:
-    payload = client.capture_page_state(
+    page_state = client.capture_page_state(
         page=page,
         captured_at=captured_at,
         screenshot_path=None,
         notes=notes or [],
-    ).to_payload()
+    )
+    return record_agent_browser_page_state(
+        source=source,
+        bundle=bundle,
+        page_state=page_state,
+    )
+
+
+def record_agent_browser_page_state(
+    *,
+    source: str,
+    bundle: RunBundle,
+    page_state: BrowserPageState,
+) -> dict:
+    payload = page_state.to_payload()
     record_live_page(source=source, bundle=bundle, payload=payload)
     return payload
 

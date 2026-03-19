@@ -77,3 +77,47 @@ def test_build_smarkets_watch_plan_groups_duplicate_lays_and_solves_thresholds()
   assert round(draw["current_back_odds"], 2) == 2.80
   assert round(draw["profit_take_back_odds"], 2) == 3.73
   assert round(draw["stop_loss_back_odds"], 2) == 3.04
+
+
+def test_build_smarkets_watch_plan_ignores_buy_positions_for_exit_thresholds() -> None:
+  watch_plan = build_smarkets_watch_plan(
+    positions=[
+      {
+        "contract": "0 - 0",
+        "market": "Correct score",
+        "side": "buy",
+        "price": 14.0,
+        "stake": 2.0,
+        "liability": 2.0,
+        "return_amount": 28.01,
+        "current_value": 1.93,
+        "pnl_amount": -0.07,
+        "pnl_percent": 3.5,
+        "status": "Order filled",
+        "current_back_odds": None,
+        "can_trade_out": False,
+      },
+      {
+        "contract": "Draw",
+        "market": "Full-time result",
+        "side": "sell",
+        "price": 4.2,
+        "stake": 8.0,
+        "liability": 25.6,
+        "return_amount": 33.6,
+        "current_value": 7.39,
+        "pnl_amount": -0.61,
+        "pnl_percent": 7.63,
+        "status": "Order filled",
+        "current_back_odds": None,
+        "can_trade_out": False,
+      },
+    ],
+    commission_rate=0.0,
+    target_profit=1.0,
+    stop_loss=1.0,
+  )
+
+  assert watch_plan["position_count"] == 2
+  assert watch_plan["watch_count"] == 1
+  assert watch_plan["watches"][0]["contract"] == "Draw"

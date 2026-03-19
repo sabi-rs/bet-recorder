@@ -107,6 +107,209 @@ def test_analyze_smarkets_open_positions_includes_to_win_positions() -> None:
     assert analysis["positions"][1]["contract"] == "Aston Villa"
 
 
+def test_analyze_smarkets_open_positions_dedupes_scroll_overlap_rows() -> None:
+    analysis = analyze_smarkets_page(
+        page="open_positions",
+        body_text=(
+            "Available balance £120.45 Exposure £41.63 Unrealized P/L -£0.49\n"
+            "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open\n"
+            "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open\n"
+            "Lazio vs Sassuolo\n"
+            "Tomorrow At 10:00 PM|Serie A\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Draw\n"
+            "Full-time result\n"
+            "3.35\n"
+            "£9.91\n"
+            "£23.29\n"
+            "£33.20\n"
+            "£9.60\n"
+            "-£0.31 (3.13%)\n"
+            "Order filled\n"
+            "Trade out\n"
+            "Lazio vs Sassuolo\n"
+            "Tomorrow At 10:00 PM|Serie A\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Draw\n"
+            "Full-time result\n"
+            "3.35\n"
+            "£9.91\n"
+            "£23.29\n"
+            "£33.20\n"
+            "£9.60\n"
+            "-£0.31 (3.13%)\n"
+            "Order filled\n"
+            "Trade out\n"
+            "Brumbies vs Chiefs\n"
+            "Tomorrow At 8:35 AM|Super Rugby\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Brumbies\n"
+            "Winner (including overtime)\n"
+            "3.00\n"
+            "£10.40\n"
+            "£20.80\n"
+            "£31.20\n"
+            "£7.23\n"
+            "-£3.17 (30.48%)\n"
+            "Order filled\n"
+            "Trade out\n"
+        ),
+        inputs={},
+        visible_actions=["Trade out"],
+    )
+
+    assert analysis["position_count"] == 2
+    assert [position["contract"] for position in analysis["positions"]] == [
+        "Draw",
+        "Brumbies",
+    ]
+    assert len(analysis["other_open_bets"]) == 1
+    assert analysis["other_open_bets"][0]["label"] == "Arsenal"
+
+
+def test_analyze_smarkets_open_positions_handles_buy_rows_and_negative_current_values() -> None:
+    analysis = analyze_smarkets_page(
+        page="open_positions",
+        body_text=(
+            "Lyon vs Celta Vigo\n"
+            "89'|UEFA Europa League\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Celta Vigo\n"
+            "Full-time result\n"
+            "2.38\n"
+            "£0.54\n"
+            "£0.74\n"
+            "£1.28\n"
+            "-£0.13\n"
+            "-£0.67 (124.65%)\n"
+            "Order filled\n"
+            "Aston Villa vs Lille OSC\n"
+            "In 28 Minutes|UEFA Europa League\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Buy 0 - 0\n"
+            "Correct score\n"
+            "14.0\n"
+            "£2.00\n"
+            "£28.01\n"
+            "£1.93\n"
+            "-£0.07 (3.5%)\n"
+            "Order filled\n"
+            "Sell Draw\n"
+            "Full-time result\n"
+            "4.2\n"
+            "£8.00\n"
+            "£25.60\n"
+            "£33.60\n"
+            "£7.39\n"
+            "-£0.61 (7.63%)\n"
+            "Order filled\n"
+        ),
+        inputs={},
+        visible_actions=[],
+    )
+
+    assert analysis["position_count"] == 3
+    assert [position["contract"] for position in analysis["positions"]] == [
+        "Celta Vigo",
+        "0 - 0",
+        "Draw",
+    ]
+    assert analysis["positions"][0]["side"] == "sell"
+    assert analysis["positions"][0]["current_value"] == -0.13
+    assert analysis["positions"][1]["side"] == "buy"
+    assert analysis["positions"][1]["liability"] == 2.0
+    assert analysis["positions"][1]["return_amount"] == 28.01
+    assert analysis["positions"][2]["side"] == "sell"
+
+
+def test_analyze_smarkets_open_positions_prefers_structured_metadata() -> None:
+    analysis = analyze_smarkets_page(
+        page="open_positions",
+        body_text="stale body text that should not be the source of truth",
+        inputs={},
+        visible_actions=[],
+        metadata={
+            "smarkets_portfolio": {
+                "extractor": "dom-v1",
+                "positions": [
+                    {
+                        "side": "sell",
+                        "contract": "Celta Vigo",
+                        "market": "Full-time result",
+                        "price": 2.38,
+                        "stake": 0.54,
+                        "liability": 0.74,
+                        "return_amount": 1.28,
+                        "current_value": -0.13,
+                        "pnl_amount": -0.67,
+                        "pnl_percent": 124.65,
+                        "status": "Order filled",
+                        "can_trade_out": False,
+                        "current_back_odds": None,
+                        "event": "Lyon vs Celta Vigo",
+                        "event_status": "89'|UEFA Europa League",
+                    },
+                    {
+                        "side": "buy",
+                        "contract": "0 - 0",
+                        "market": "Correct score",
+                        "price": 14.0,
+                        "stake": 2.0,
+                        "liability": 2.0,
+                        "return_amount": 28.01,
+                        "current_value": 1.93,
+                        "pnl_amount": -0.07,
+                        "pnl_percent": 3.5,
+                        "status": "Order filled",
+                        "can_trade_out": False,
+                        "current_back_odds": None,
+                        "event": "Aston Villa vs Lille OSC",
+                        "event_status": "In 28 Minutes|UEFA Europa League",
+                    },
+                ],
+            }
+        },
+    )
+
+    assert analysis["position_count"] == 2
+    assert [position["contract"] for position in analysis["positions"]] == [
+        "Celta Vigo",
+        "0 - 0",
+    ]
+    assert analysis["positions"][0]["current_value"] == -0.13
+    assert analysis["positions"][1]["side"] == "buy"
+
+
 def test_analyze_smarkets_open_positions_enriches_event_url_score_and_implied_probability() -> (
     None
 ):

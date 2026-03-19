@@ -26,6 +26,7 @@ def test_append_page_snapshot_writes_expected_event_shape(tmp_path: Path) -> Non
     screenshot_path="/tmp/market.png",
     notes=["example"],
     captured_at=datetime(2026, 3, 9, 10, 0, 0, tzinfo=UTC),
+    metadata={"selector": "market-card"},
   )
 
   append_page_snapshot(events_path, snapshot)
@@ -48,6 +49,7 @@ def test_append_page_snapshot_writes_expected_event_shape(tmp_path: Path) -> Non
     "local_storage_keys": ["theme"],
     "screenshot_path": "/tmp/market.png",
     "notes": ["example"],
+    "metadata": {"selector": "market-card"},
   }
 
 

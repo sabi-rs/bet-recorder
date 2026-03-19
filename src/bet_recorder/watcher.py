@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import signal
 import time
+from urllib.parse import parse_qs, urlparse
 
 from bet_recorder.analysis.smarkets_exchange import (
     parse_event_page_body_summary,
@@ -15,12 +16,16 @@ from bet_recorder.analysis.smarkets_exchange import (
 )
 from bet_recorder.analysis.position_watch import build_smarkets_watch_plan
 from bet_recorder.browser.agent_browser import AgentBrowserClient
+from bet_recorder.browser.models import BrowserPageState
 from bet_recorder.capture.run_bundle import load_run_bundle
 from bet_recorder.exchange_worker import (
     analyze_positions_payload,
     build_exchange_panel_snapshot,
 )
-from bet_recorder.live.agent_browser_capture import capture_agent_browser_page_state
+from bet_recorder.live.agent_browser_capture import (
+    capture_agent_browser_page_state,
+    record_agent_browser_page_state,
+)
 from bet_recorder.live.smarkets_profile_capture import PersistentSmarketsProfileClient
 from bet_recorder.watcher_state import (
     build_watcher_error_state,
@@ -47,6 +52,13 @@ LIVE_POLL_INTERVAL_SECONDS = 0.1
 LIVE_EVENT_SUMMARY_REFRESH_SECONDS = 2.0
 IDLE_EVENT_SUMMARY_REFRESH_SECONDS = 30.0
 EVENT_PAGE_NAVIGATION_WAIT_MS = 2500
+PORTFOLIO_SCROLL_CAPTURE_WAIT_MS = 200
+PORTFOLIO_SCROLL_CAPTURE_MAX_STEPS = 12
+SMARKETS_PORTFOLIO_METADATA_KEY = "smarkets_portfolio"
+SMARKETS_PORTFOLIO_EXTRACTOR_VERSION = "dom-v1"
+SMARKETS_ACTIVE_PORTFOLIO_URL = (
+    "https://smarkets.com/portfolio/?time=all&order-state=active"
+)
 
 
 def run_smarkets_watcher(
@@ -168,10 +180,8 @@ def capture_current_smarkets_open_positions(
         lambda: ensure_smarkets_activity_filter(client=client), client=client
     )
     payload = _with_navigation_retry(
-        lambda: capture_agent_browser_page_state(
-            source="smarkets_exchange",
+        lambda: _capture_smarkets_open_positions_page_state(
             bundle=bundle,
-            page="open_positions",
             captured_at=captured_at,
             client=client,
             notes=["watcher-loop"],
@@ -198,6 +208,394 @@ def capture_current_smarkets_open_positions(
         sidecar_session=_event_summary_session_name(config.session),
     )
     return payload
+
+
+def _capture_smarkets_open_positions_page_state(
+    *,
+    bundle,
+    captured_at: datetime,
+    client,
+    notes: list[str],
+) -> dict:
+    capture_page_state = getattr(client, "capture_page_state", None)
+    evaluate = getattr(client, "evaluate", None)
+    if not callable(capture_page_state) or not callable(evaluate):
+        return capture_agent_browser_page_state(
+            source="smarkets_exchange",
+            bundle=bundle,
+            page="open_positions",
+            captured_at=captured_at,
+            client=client,
+            notes=notes,
+        )
+
+    states = [_capture_structured_smarkets_portfolio_state(
+        capture_page_state=capture_page_state,
+        client=client,
+        captured_at=captured_at,
+        notes=notes,
+    )]
+    try:
+        for _ in range(PORTFOLIO_SCROLL_CAPTURE_MAX_STEPS):
+            metrics = _scroll_smarkets_portfolio_page(client=client)
+            if not metrics.get("advanced"):
+                break
+            client.wait(PORTFOLIO_SCROLL_CAPTURE_WAIT_MS)
+            states.append(
+                _capture_structured_smarkets_portfolio_state(
+                    capture_page_state=capture_page_state,
+                    client=client,
+                    captured_at=captured_at,
+                    notes=notes,
+                )
+            )
+            if metrics.get("at_end"):
+                break
+    finally:
+        _reset_smarkets_portfolio_scroll(client=client)
+
+    merged_state = _merge_browser_page_states(states)
+    return record_agent_browser_page_state(
+        source="smarkets_exchange",
+        bundle=bundle,
+        page_state=merged_state,
+    )
+
+
+def _capture_structured_smarkets_portfolio_state(
+    *,
+    capture_page_state,
+    client,
+    captured_at: datetime,
+    notes: list[str],
+) -> BrowserPageState:
+    page_state = capture_page_state(
+        page="open_positions",
+        captured_at=captured_at,
+        screenshot_path=None,
+        notes=list(notes),
+    )
+    metadata = dict(page_state.metadata)
+    portfolio = _extract_smarkets_portfolio_structure(client=client)
+    if portfolio.get("positions") or portfolio.get("groups"):
+        metadata[SMARKETS_PORTFOLIO_METADATA_KEY] = portfolio
+    return BrowserPageState(
+        captured_at=page_state.captured_at,
+        page=page_state.page,
+        url=page_state.url,
+        document_title=page_state.document_title,
+        body_text=page_state.body_text,
+        interactive_snapshot=page_state.interactive_snapshot,
+        links=page_state.links,
+        inputs=page_state.inputs,
+        visible_actions=page_state.visible_actions,
+        resource_hosts=page_state.resource_hosts,
+        local_storage_keys=page_state.local_storage_keys,
+        screenshot_path=page_state.screenshot_path,
+        notes=page_state.notes,
+        metadata=metadata,
+    )
+
+
+def _extract_smarkets_portfolio_structure(*, client) -> dict:
+    result = client.evaluate(
+        r"""(() => {
+const normalizeText = (value) => (value || '').replace(/\s+/g, ' ').trim();
+const textContent = (element) => normalizeText(element?.textContent || element?.innerText || '');
+const bestText = (elements) => {
+  const values = Array.from(elements || [])
+    .map((element) => textContent(element))
+    .filter(Boolean)
+    .sort((left, right) => left.length - right.length);
+  return values[0] || '';
+};
+const parseMoney = (value) => {
+  const match = normalizeText(value).match(/^(-)?£([\d,.]+)$/);
+  if (!match) return null;
+  const amount = Number.parseFloat(match[2].replace(/,/g, ''));
+  return match[1] ? -amount : amount;
+};
+const parseFloatValue = (value) => {
+  const normalized = normalizeText(value).replace(/,/g, '');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const parsePnl = (value) => {
+  const match = normalizeText(value).match(/^([+-])£([\d,.]+)\s+\(([\d.]+)%\)$/);
+  if (!match) return { pnl_amount: null, pnl_percent: null };
+  const amount = Number.parseFloat(match[2].replace(/,/g, ''));
+  return {
+    pnl_amount: match[1] === '-' ? -amount : amount,
+    pnl_percent: Number.parseFloat(match[3]),
+  };
+};
+const cardContainers = Array.from(document.querySelectorAll('[class*="OrderListGroup_container"]'));
+const groups = [];
+for (const container of cardContainers) {
+  const title = textContent(container.querySelector('[class*="OrderListGroup_title__"], [class*="OrderListGroup_title"]'));
+  let eventTitle = bestText(container.querySelectorAll('[class*="OrderListGroup_title"]'));
+  const orderCount = parseFloatValue(textContent(container.querySelector('[class*="OrderListGroup_orderCount"]')));
+  if (eventTitle && orderCount !== null) {
+    const orderCountLabel = String(orderCount);
+    if (eventTitle.endsWith(orderCountLabel)) {
+      eventTitle = normalizeText(eventTitle.slice(0, eventTitle.length - orderCountLabel.length));
+    }
+  }
+  const labelNodes = Array.from(container.querySelectorAll('[class*="OrderListGroup_label"]')).map(textContent).filter(Boolean);
+  const eventStatus = labelNodes.find((label) => label.includes('|')) || '';
+  const worstOutcome = parseMoney(textContent(container.querySelector('[class*="OrderListGroup_headerWorstOutcome"] [class*="OrderListGroup_figure"], [class*="OrderListGroup_headerWorstOutcome"]')));
+  const bestOutcome = parseMoney(textContent(container.querySelector('[class*="OrderListGroup_headerBestOutcome"] [class*="OrderListGroup_figure"], [class*="OrderListGroup_headerBestOutcome"]')));
+  const eventUrl = (() => {
+    const anchor = container.querySelector('a[href*="smarkets.com/"]');
+    return anchor instanceof HTMLAnchorElement ? anchor.href : '';
+  })();
+  const itemContainers = Array.from(container.querySelectorAll('[class*="OrderListGroupItem_groupItemContainer"], [class*="OrderListGroupItem_container__"]'))
+    .filter((element) => textContent(element).startsWith('Sell ') || textContent(element).startsWith('Buy '));
+  const positions = itemContainers.map((item) => {
+    const side = textContent(item.querySelector('[class*="OrderListGroupItem_orderSide"]')).toLowerCase();
+    let contract = bestText(item.querySelectorAll('[class*="OrderListGroupItem_contract"]'));
+    if (side && contract.toLowerCase().startsWith(`${side} `)) {
+      contract = normalizeText(contract.slice(side.length + 1));
+    }
+    const market = textContent(item.querySelector('[class*="OrderListGroupItem_market"]'));
+    const price = parseFloatValue(textContent(item.querySelector('[class*="OrderListGroupItem_colPrice"]')));
+    const stakeValues = Array.from(item.querySelectorAll('[class*="OrderListGroupItem_colStake"] span, [class*="OrderListGroupItem_colStake"] div, [class*="OrderListGroupItem_colStake"]'))
+      .map(textContent)
+      .map(parseMoney)
+      .filter((value) => value !== null);
+    const stake = stakeValues[0] ?? null;
+    const liability = (side === 'buy') ? stake : (stakeValues[1] ?? null);
+    const returnAmount = parseMoney(textContent(item.querySelector('[class*="OrderListGroupItem_colReturn"]')));
+    const currentValue = parseMoney(textContent(item.querySelector('[class*="OrderListGroupItem_colCurrentValue"] [class*="currentValueText"], [class*="OrderListGroupItem_colCurrentValue"] span:not([class*="Difference"]), [class*="OrderListGroupItem_colCurrentValue"]')));
+    const pnl = parsePnl(textContent(item.querySelector('[class*="Difference"], [class*="currentValueDifference"], [class*="profitLoss"]')));
+    const status = textContent(item.querySelector('[class*="OrderListGroupItem_colState"]'));
+    const actionText = textContent(item.querySelector('[class*="OrderListGroupItem_colAction"]'));
+    const currentBackOdds = (() => {
+      const match = actionText.match(/Back\s+([\d.]+)/i);
+      return match ? Number.parseFloat(match[1]) : null;
+    })();
+    return {
+      side,
+      contract,
+      market,
+      price,
+      stake,
+      liability,
+      return_amount: returnAmount,
+      current_value: currentValue,
+      pnl_amount: pnl.pnl_amount,
+      pnl_percent: pnl.pnl_percent,
+      status,
+      can_trade_out: /trade out/i.test(actionText),
+      current_back_odds: currentBackOdds,
+      event: eventTitle,
+      event_status: eventStatus,
+      event_url: eventUrl,
+      order_count: orderCount,
+      best_outcome: bestOutcome,
+      worst_outcome: worstOutcome,
+    };
+  }).filter((position) => position.contract && position.market);
+  if (!eventTitle && positions.length === 0) continue;
+  groups.push({
+    title: eventTitle,
+    order_count: orderCount,
+    event_status: eventStatus,
+    event_url: eventUrl,
+    best_outcome: bestOutcome,
+    worst_outcome: worstOutcome,
+    positions,
+  });
+}
+return {
+  extractor: 'dom-v1',
+  groups,
+  positions: groups.flatMap((group) => group.positions),
+};
+})()"""
+    )
+    if isinstance(result, dict):
+        return result
+    return {
+        "extractor": SMARKETS_PORTFOLIO_EXTRACTOR_VERSION,
+        "groups": [],
+        "positions": [],
+    }
+
+
+def _scroll_smarkets_portfolio_page(*, client) -> dict:
+    result = client.evaluate(
+        "(() => {"
+        "const candidates = [document.scrollingElement, ...document.querySelectorAll('*')].filter(Boolean);"
+        "const target = candidates"
+        ".filter((element) => {"
+        "  const style = window.getComputedStyle(element);"
+        "  const overflowY = style?.overflowY || '';"
+        "  const canScroll = element.scrollHeight - element.clientHeight > 24;"
+        "  const scrollable = ['auto', 'scroll', 'overlay'].includes(overflowY)"
+        "    || element === document.scrollingElement;"
+        "  return canScroll && scrollable && element.clientHeight >= 160;"
+        "})"
+        ".sort((left, right) => (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight))[0]"
+        " || document.scrollingElement || document.documentElement;"
+        "if (!(target instanceof Element) && target !== document.scrollingElement && target !== document.documentElement) {"
+        "  return { advanced: false, at_end: true, top: 0, max_top: 0 };"
+        "}"
+        "const viewport = Math.max(target.clientHeight || window.innerHeight || 0, 1);"
+        "const maxTop = Math.max((target.scrollHeight || 0) - (target.clientHeight || 0), 0);"
+        "const before = target === document.scrollingElement ? (window.scrollY || 0) : target.scrollTop;"
+        "const next = Math.min(before + Math.max(Math.floor(viewport * 0.85), 200), maxTop);"
+        "if (target === document.scrollingElement) {"
+        "  window.scrollTo(0, next);"
+        "} else {"
+        "  target.scrollTop = next;"
+        "}"
+        "const after = target === document.scrollingElement ? (window.scrollY || 0) : target.scrollTop;"
+        "return { advanced: after > before + 4, at_end: after >= maxTop - 4, top: after, max_top: maxTop };"
+        "})()"
+    )
+    return result if isinstance(result, dict) else {"advanced": False, "at_end": True}
+
+
+def _reset_smarkets_portfolio_scroll(*, client) -> None:
+    evaluate = getattr(client, "evaluate", None)
+    if not callable(evaluate):
+        return
+    try:
+        evaluate(
+            "(() => {"
+            "const candidates = [document.scrollingElement, ...document.querySelectorAll('*')].filter(Boolean);"
+            "const target = candidates"
+            ".filter((element) => {"
+            "  const style = window.getComputedStyle(element);"
+            "  const overflowY = style?.overflowY || '';"
+            "  const canScroll = element.scrollHeight - element.clientHeight > 24;"
+            "  const scrollable = ['auto', 'scroll', 'overlay'].includes(overflowY)"
+            "    || element === document.scrollingElement;"
+            "  return canScroll && scrollable && element.clientHeight >= 160;"
+            "})"
+            ".sort((left, right) => (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight))[0]"
+            " || document.scrollingElement || document.documentElement;"
+            "if (target === document.scrollingElement) {"
+            "  window.scrollTo(0, 0);"
+            "} else if (target) {"
+            "  target.scrollTop = 0;"
+            "}"
+            "return true;"
+            "})()"
+        )
+    except Exception:
+        return
+
+
+def _merge_browser_page_states(states: list[BrowserPageState]) -> BrowserPageState:
+    if len(states) == 1:
+        return states[0]
+
+    base = states[0]
+    interactive_snapshot = _dedupe_interactive_snapshots(states)
+    body_parts: list[str] = []
+    links: list[str] = []
+    visible_actions: list[str] = []
+    resource_hosts: list[str] = []
+    local_storage_keys: list[str] = []
+    inputs = dict(base.inputs)
+    metadata = _merge_browser_page_state_metadata(states)
+
+    for state in states:
+        if state.body_text and state.body_text not in body_parts:
+            body_parts.append(state.body_text)
+        links.extend(state.links)
+        visible_actions.extend(state.visible_actions)
+        resource_hosts.extend(state.resource_hosts)
+        local_storage_keys.extend(state.local_storage_keys)
+        inputs.update(state.inputs)
+
+    return BrowserPageState(
+        captured_at=base.captured_at,
+        page=base.page,
+        url=states[-1].url,
+        document_title=states[-1].document_title,
+        body_text="\n".join(body_parts),
+        interactive_snapshot=interactive_snapshot,
+        links=list(dict.fromkeys(links)),
+        inputs=inputs,
+        visible_actions=list(dict.fromkeys(visible_actions)),
+        resource_hosts=list(dict.fromkeys(resource_hosts)),
+        local_storage_keys=list(dict.fromkeys(local_storage_keys)),
+        screenshot_path=base.screenshot_path,
+        notes=[*base.notes, "scroll-capture"],
+        metadata=metadata,
+    )
+
+
+def _dedupe_interactive_snapshots(states: list[BrowserPageState]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for state in states:
+        for item in state.interactive_snapshot:
+            key = (
+                str(item.get("role", "") or ""),
+                str(item.get("name", "") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def _merge_browser_page_state_metadata(states: list[BrowserPageState]) -> dict:
+    merged: dict = {}
+    portfolio_groups: list[dict] = []
+    portfolio_positions: list[dict] = []
+    seen_groups: set[tuple[str, str, int | None]] = set()
+    seen_positions: set[tuple] = set()
+    extractor = SMARKETS_PORTFOLIO_EXTRACTOR_VERSION
+
+    for state in states:
+        for key, value in state.metadata.items():
+            if key != SMARKETS_PORTFOLIO_METADATA_KEY:
+                merged[key] = value
+        portfolio = state.metadata.get(SMARKETS_PORTFOLIO_METADATA_KEY)
+        if not isinstance(portfolio, dict):
+            continue
+        extractor = str(portfolio.get("extractor") or extractor)
+        for group in portfolio.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            group_key = (
+                str(group.get("title", "") or ""),
+                str(group.get("event_status", "") or ""),
+                group.get("order_count"),
+            )
+            if group_key not in seen_groups:
+                seen_groups.add(group_key)
+                portfolio_groups.append(group)
+        for position in portfolio.get("positions") or []:
+            if not isinstance(position, dict):
+                continue
+            position_key = (
+                str(position.get("side", "") or ""),
+                str(position.get("contract", "") or ""),
+                str(position.get("market", "") or ""),
+                str(position.get("event", "") or ""),
+                position.get("price"),
+                position.get("stake"),
+                position.get("liability"),
+                position.get("return_amount"),
+            )
+            if position_key not in seen_positions:
+                seen_positions.add(position_key)
+                portfolio_positions.append(position)
+
+    if portfolio_groups or portfolio_positions:
+        merged[SMARKETS_PORTFOLIO_METADATA_KEY] = {
+            "extractor": extractor,
+            "groups": portfolio_groups,
+            "positions": portfolio_positions,
+        }
+    return merged
 
 
 def _retry_smarkets_error_overlay_capture(
@@ -252,12 +650,9 @@ def _click_smarkets_try_again(*, client) -> bool:
 
 def bootstrap_smarkets_page(*, client, profile_path: Path | None) -> None:
     current_url = client.current_url()
-    if (
-        current_url.startswith("https://smarkets.com/portfolio")
-        or "open-positions" in current_url
-    ):
+    if _is_smarkets_active_portfolio_url(current_url) or "open-positions" in current_url:
         return
-    client.open_url("https://smarkets.com/portfolio/")
+    client.open_url(SMARKETS_ACTIVE_PORTFOLIO_URL)
     client.wait(1500)
 
 
@@ -307,8 +702,19 @@ def ensure_smarkets_authenticated(*, client) -> None:
                 "if (submit.disabled) {"
                 "throw new Error('Smarkets login submit button is still disabled');"
                 "}"
-                "setTimeout(() => submit.click(), 0);"
-                "return { submitted: true, rememberMeChecked: !!(remember && remember.checked) };"
+                "const form = submit.form || submit.closest('form');"
+                "setTimeout(() => {"
+                "  if (form instanceof HTMLFormElement && typeof form.requestSubmit === 'function') {"
+                "    form.requestSubmit(submit);"
+                "    return;"
+                "  }"
+                "  submit.click();"
+                "}, 0);"
+                "return {"
+                "  submitted: true,"
+                "  method: (form instanceof HTMLFormElement && typeof form.requestSubmit === 'function') ? 'requestSubmit' : 'click',"
+                "  rememberMeChecked: !!(remember && remember.checked)"
+                "};"
                 "}"
             )
             submitted = True
@@ -330,8 +736,13 @@ def ensure_smarkets_authenticated(*, client) -> None:
                 "if (!(submit instanceof HTMLButtonElement)) {"
                 "throw new Error('Smarkets login submit button not found');"
                 "}"
+                "const form = submit.form || submit.closest('form');"
+                "if (form instanceof HTMLFormElement && typeof form.requestSubmit === 'function') {"
+                "form.requestSubmit(submit);"
+                "return { submitted: true, method: 'requestSubmit' };"
+                "}"
                 "submit.click();"
-                "return true;"
+                "return { submitted: true, method: 'click' };"
                 "}"
             )
         else:
@@ -345,7 +756,7 @@ def ensure_smarkets_authenticated(*, client) -> None:
 
     current_url = client.current_url()
     if "login=true" in current_url:
-        client.open_url("https://smarkets.com/portfolio/")
+        client.open_url(SMARKETS_ACTIVE_PORTFOLIO_URL)
         client.wait(1500)
 
 
@@ -438,6 +849,17 @@ def _current_smarkets_activity_filter(*, client) -> str | None:
         ");"
         "return combobox ? (combobox.innerText || '').trim() : null;"
         "})()"
+    )
+
+
+def _is_smarkets_active_portfolio_url(url: str) -> bool:
+    if not url.startswith("https://smarkets.com/portfolio"):
+        return False
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    return (
+        query.get("order-state", [None])[0] == "active"
+        and query.get("time", [None])[0] == "all"
     )
 
 

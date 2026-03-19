@@ -9,8 +9,17 @@ import json
 from bet_recorder.analysis.bet365 import analyze_bet365_page
 from bet_recorder.analysis.betuk import analyze_betuk_page
 from bet_recorder.analysis.betway_uk import analyze_betway_page
+from bet_recorder.analysis.generic_sportsbooks import (
+    analyze_bet600_page,
+    analyze_betfred_page,
+    analyze_coral_page,
+    analyze_kwik_page,
+    analyze_ladbrokes_page,
+)
+from bet_recorder.analysis.racing_markets import analyze_racing_market_page
 from bet_recorder.analysis.position_watch import build_smarkets_watch_plan
 from bet_recorder.actions.smarkets_cashout import handle_cash_out_tracked_bet
+from bet_recorder.actions.trading_actions import execute_trading_action
 from bet_recorder.analysis.smarkets_exchange import analyze_smarkets_page
 from bet_recorder.browser.agent_browser import AgentBrowserClient
 from bet_recorder.browser.cdp import (
@@ -18,10 +27,8 @@ from bet_recorder.browser.cdp import (
     list_debug_targets,
     select_debug_target_by_fragments,
 )
-from bet_recorder.capture.run_bundle import load_run_bundle
 from bet_recorder.ledger.loader import load_tracked_bets
 from bet_recorder.ledger.policy import build_exit_recommendations
-from bet_recorder.live.agent_browser_capture import capture_agent_browser_page
 
 DEFAULT_LEDGER_HISTORY_PATH = (
     Path.home() / "Documents" / "Bets" / "output" / "ledger" / "statement-history.json"
@@ -33,6 +40,29 @@ HISTORICAL_POSITION_ACTIVITY_TYPES = {
     "cash_out",
 }
 DEFAULT_SELECTED_VENUE = "smarkets"
+LIVE_VENUE_ORDER = (
+    "bet365",
+    "betdaq",
+    "betfred",
+    "betway",
+    "betuk",
+    "coral",
+    "ladbrokes",
+    "kwik",
+    "bet600",
+)
+HORSE_MARKET_VENUES = (
+    "bet365",
+    "betuk",
+    "betway",
+    "betfred",
+    "coral",
+    "ladbrokes",
+    "kwik",
+    "bet600",
+    "smarkets",
+    "betdaq",
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +103,34 @@ LIVE_VENUE_DEFINITIONS = {
         page="my_bets",
         url_fragments=("betfred.com",),
     ),
+    "coral": LiveVenueDefinition(
+        venue="coral",
+        label="Coral",
+        source="coral",
+        page="my_bets",
+        url_fragments=("coral.co.uk", "coral"),
+    ),
+    "ladbrokes": LiveVenueDefinition(
+        venue="ladbrokes",
+        label="Ladbrokes",
+        source="ladbrokes",
+        page="my_bets",
+        url_fragments=("ladbrokes.com", "ladbrokes"),
+    ),
+    "kwik": LiveVenueDefinition(
+        venue="kwik",
+        label="Kwik",
+        source="kwik",
+        page="my_bets",
+        url_fragments=("kwiff.com", "kwik"),
+    ),
+    "bet600": LiveVenueDefinition(
+        venue="bet600",
+        label="Bet600",
+        source="bet600",
+        page="my_bets",
+        url_fragments=("bet600.co.uk", "bet600.com", "bet600"),
+    ),
     "betdaq": LiveVenueDefinition(
         venue="betdaq",
         label="Betdaq",
@@ -80,6 +138,17 @@ LIVE_VENUE_DEFINITIONS = {
         page="open_positions",
         url_fragments=("betdaq.com",),
     ),
+}
+HORSE_MARKET_DEFINITIONS = {
+    **LIVE_VENUE_DEFINITIONS,
+    "smarkets": LiveVenueDefinition(
+        venue="smarkets",
+        label="Smarkets",
+        source="smarkets_exchange",
+        page="market",
+        url_fragments=("smarkets.com",),
+    ),
+    "betway": LIVE_VENUE_DEFINITIONS["betway"],
 }
 
 
@@ -169,6 +238,7 @@ def load_watch_snapshot(
         visible_actions=payload.get("visible_actions", []),
         links=payload.get("links", []),
         event_summaries=payload.get("event_summaries", []),
+        metadata=payload.get("metadata"),
     )
     if analysis["page"] != "open_positions":
         raise ValueError("watch-open-positions requires an open_positions payload.")
@@ -194,6 +264,7 @@ def analyze_positions_payload(payload: dict) -> dict:
         visible_actions=payload.get("visible_actions", []),
         links=payload.get("links", []),
         event_summaries=payload.get("event_summaries", []),
+        metadata=payload.get("metadata"),
     )
     if analysis["page"] != "open_positions":
         raise ValueError("positions payload must be an open_positions capture.")
@@ -235,15 +306,23 @@ def capture_current_smarkets_open_positions(config: WorkerConfig) -> None:
     if config.run_dir is None or config.agent_browser_session is None:
         return
 
-    bundle = load_run_bundle(source="smarkets_exchange", run_dir=config.run_dir)
+    from bet_recorder.watcher import (
+        WatcherConfig,
+        capture_current_smarkets_open_positions as capture_open_positions_for_watcher,
+    )
+
     client = AgentBrowserClient(session=config.agent_browser_session)
-    capture_agent_browser_page(
-        source="smarkets_exchange",
-        bundle=bundle,
-        page="open_positions",
-        captured_at=datetime.now(UTC),
+    capture_open_positions_for_watcher(
+        WatcherConfig(
+            run_dir=config.run_dir,
+            session=config.agent_browser_session,
+            interval_seconds=0.0,
+            commission_rate=config.commission_rate,
+            target_profit=config.target_profit,
+            stop_loss=config.stop_loss,
+        ),
+        datetime.now(UTC),
         client=client,
-        notes=["exchange-worker-refresh"],
     )
 
 
@@ -286,7 +365,42 @@ def analyze_live_venue_payload(venue: str, payload: dict) -> dict:
             inputs=payload.get("inputs", {}),
             visible_actions=payload.get("visible_actions", []),
         )
-    if venue in {"betfred", "betdaq"}:
+    if venue == "betfred":
+        return analyze_betfred_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "coral":
+        return analyze_coral_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "ladbrokes":
+        return analyze_ladbrokes_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "kwik":
+        return analyze_kwik_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "bet600":
+        return analyze_bet600_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    if venue == "betdaq":
         return analyze_generic_live_venue_page(
             venue=venue,
             page=payload["page"],
@@ -534,6 +648,54 @@ def build_unavailable_live_venue_snapshot(
     }
 
 
+def build_waiting_for_watcher_snapshot(*, config: WorkerConfig, detail: str) -> dict:
+    return {
+        "worker": {
+            "name": "bet-recorder",
+            "status": "busy",
+            "detail": detail,
+        },
+        "venues": build_live_venue_summaries(
+            selected_venue="smarkets",
+            selected_status="connected",
+        ),
+        "selected_venue": "smarkets",
+        "events": [],
+        "markets": [],
+        "preflight": None,
+        "status_line": detail,
+        "runtime": {
+            "updated_at": "",
+            "source": "watcher-state",
+            "decision_count": 0,
+            "watcher_iteration": None,
+            "stale": False,
+            "session": {
+                "name": config.agent_browser_session,
+                "current_url": "",
+                "document_title": "",
+                "page_hint": "waiting",
+                "open_positions_ready": False,
+                "validation_error": detail,
+            },
+        },
+        "account_stats": None,
+        "open_positions": [],
+        "historical_positions": load_historical_positions(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "other_open_bets": [],
+        "decisions": [],
+        "watch": None,
+        "tracked_bets": load_tracked_bets(config.companion_legs_path),
+        "exit_policy": build_exit_policy_summary(
+            {"target_profit": 0.0, "stop_loss": 0.0},
+            hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
+            warn_only_default=config.warn_only_default,
+        ),
+        "exit_recommendations": [],
+    }
+
+
 def build_live_venue_summaries(
     *,
     selected_venue: str | None,
@@ -557,7 +719,7 @@ def build_live_venue_summaries(
         targets = list_debug_targets()
     except Exception:
         targets = []
-    for venue in ("bet365", "betdaq", "betfred", "betway", "betuk"):
+    for venue in LIVE_VENUE_ORDER:
         definition = LIVE_VENUE_DEFINITIONS[venue]
         target = _find_live_venue_target(targets=targets, venue=venue)
         if target is None:
@@ -607,6 +769,16 @@ def build_live_venue_summaries(
             }
         )
     return summaries
+
+
+def _should_return_waiting_snapshot(config: WorkerConfig, error: ValueError) -> bool:
+    if config.run_dir is None or config.agent_browser_session is None:
+        return False
+    message = str(error)
+    return (
+        "Run bundle does not contain events.jsonl" in message
+        or "No positions_snapshot event found in run bundle" in message
+    )
 
 
 def _selected_live_venue_detail(label: str, status: str | None) -> str:
@@ -672,6 +844,190 @@ def _find_live_venue_target(
         )
     except ValueError:
         return None
+
+
+def _find_live_venue_targets(
+    *,
+    targets: list,
+    venue: str,
+) -> list:
+    definition = HORSE_MARKET_DEFINITIONS.get(venue)
+    if definition is None:
+        return []
+    lowered_fragments = [fragment.lower() for fragment in definition.url_fragments if fragment]
+    matched = []
+    for target in targets:
+        lowered_url = str(target.url).lower()
+        if any(fragment in lowered_url for fragment in lowered_fragments):
+            matched.append(target)
+    return matched
+
+
+def _matches_horse_search_terms(*, query: dict, event_name: str, selection_names: list[str]) -> bool:
+    terms = [
+        str(term).strip().lower()
+        for term in query.get("search", [])
+        if str(term).strip()
+    ]
+    if not terms:
+        return True
+    haystack = " ".join([event_name, *selection_names]).lower()
+    return any(term in haystack for term in terms)
+
+
+def capture_live_horse_market_snapshot(query: dict) -> dict:
+    bookmakers = [
+        str(venue).strip().lower()
+        for venue in query.get("bookmakers", [])
+        if str(venue).strip()
+    ]
+    exchanges = [
+        str(venue).strip().lower()
+        for venue in query.get("exchanges", [])
+        if str(venue).strip()
+    ]
+    requested_venues = list(dict.fromkeys([*bookmakers, *exchanges]))
+    if not requested_venues:
+        requested_venues = ["betfred", "coral", "smarkets", "betdaq"]
+
+    unsupported = [venue for venue in requested_venues if venue not in HORSE_MARKET_DEFINITIONS]
+    if unsupported:
+        raise ValueError(
+            "Unsupported horse matcher venues: " + ", ".join(sorted(set(unsupported)))
+        )
+
+    try:
+        targets = list_debug_targets()
+    except Exception as exc:
+        raise ValueError(f"Failed to inspect browser targets for horse matcher: {exc}") from exc
+
+    captured_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sources: list[dict] = []
+
+    for venue in requested_venues:
+        definition = HORSE_MARKET_DEFINITIONS[venue]
+        venue_targets = _find_live_venue_targets(targets=targets, venue=venue)
+        if not venue_targets:
+            sources.append(
+                {
+                    "venue": venue,
+                    "venue_label": definition.label,
+                    "kind": "exchange" if venue in {"smarkets", "betdaq"} else "sportsbook",
+                    "status": "missing",
+                    "detail": "No live browser tab detected for venue.",
+                    "page_url": "",
+                    "page_title": "",
+                    "event_name": "",
+                    "market_name": "",
+                    "start_hint": "",
+                    "captured_at": captured_at,
+                    "quotes": [],
+                }
+            )
+            continue
+
+        for target in venue_targets:
+            payload = capture_debug_target_page_state(
+                websocket_debugger_url=target.websocket_debugger_url,
+                page="market",
+                captured_at=datetime.now(UTC),
+                notes=[f"horse-matcher:{venue}"],
+            )
+            analysis = analyze_racing_market_page(
+                venue=venue,
+                page=payload["page"],
+                url=str(payload.get("url", "")),
+                document_title=str(payload.get("document_title", "")),
+                body_text=str(payload.get("body_text", "")),
+                interactive_snapshot=list(payload.get("interactive_snapshot", [])),
+            )
+            selection_names = [
+                str(quote.get("selection_name", ""))
+                for quote in analysis.get("quotes", [])
+                if str(quote.get("selection_name", ""))
+            ]
+            status = str(analysis.get("status", "ignored"))
+            detail = str(analysis.get("detail", ""))
+            if status == "ready" and not _matches_horse_search_terms(
+                query=query,
+                event_name=str(analysis.get("event_name", "")),
+                selection_names=selection_names,
+            ):
+                status = "ignored"
+                detail = "Market captured but filtered out by search terms."
+
+            sources.append(
+                {
+                    "venue": venue,
+                    "venue_label": definition.label,
+                    "kind": "exchange" if venue in {"smarkets", "betdaq"} else "sportsbook",
+                    "status": status,
+                    "detail": detail,
+                    "page_url": str(payload.get("url", "")),
+                    "page_title": str(payload.get("document_title", "")),
+                    "event_name": str(analysis.get("event_name", "")),
+                    "market_name": str(analysis.get("market_name", "")),
+                    "start_hint": str(analysis.get("start_hint", "")),
+                    "captured_at": str(payload.get("captured_at", captured_at)),
+                    "quotes": list(analysis.get("quotes", [])),
+                }
+            )
+
+    ready_count = sum(1 for source in sources if source["status"] == "ready")
+    return {
+        "captured_at": captured_at,
+        "source_count": len(sources),
+        "ready_source_count": ready_count,
+        "sources": sources,
+    }
+
+
+def build_horse_matcher_snapshot_response(
+    *,
+    market_snapshot: dict,
+    selected_venue: str,
+) -> dict:
+    ready_source_count = int(market_snapshot.get("ready_source_count", 0))
+    source_count = int(market_snapshot.get("source_count", 0))
+    status = "ready" if ready_source_count > 0 else "error"
+    detail = (
+        f"Captured {ready_source_count} readable horse-racing market source(s) from {source_count} tab(s)."
+    )
+    return {
+        "worker": {
+            "name": "bet-recorder",
+            "status": status,
+            "detail": detail,
+        },
+        "venues": build_live_venue_summaries(selected_venue=selected_venue),
+        "selected_venue": selected_venue,
+        "events": [],
+        "markets": [],
+        "preflight": None,
+        "status_line": detail,
+        "runtime": {
+            "updated_at": str(market_snapshot.get("captured_at", "")),
+            "source": "horse_market_capture",
+            "decision_count": 0,
+            "watcher_iteration": None,
+            "stale": False,
+        },
+        "account_stats": None,
+        "open_positions": [],
+        "historical_positions": [],
+        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "other_open_bets": [],
+        "decisions": [],
+        "watch": None,
+        "tracked_bets": [],
+        "exit_policy": build_exit_policy_summary(
+            {"target_profit": 0.0, "stop_loss": 0.0},
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+        ),
+        "exit_recommendations": [],
+        "horse_matcher": market_snapshot,
+    }
 
 
 def build_exit_policy_summary(
@@ -752,7 +1108,7 @@ def load_other_open_bets(payload_path: Path | None) -> list[dict]:
 
 def capture_live_other_open_bets() -> list[dict]:
     collected: list[dict] = []
-    for venue in ("bet365", "betdaq", "betfred", "betway", "betuk"):
+    for venue in LIVE_VENUE_ORDER:
         try:
             payload = capture_current_live_venue_payload(venue)
             analysis = analyze_live_venue_payload(venue, payload)
@@ -1036,11 +1392,52 @@ def _positions_missing_event_context(positions: list[dict]) -> bool:
     return False
 
 
-def _load_fresh_positions_analysis(config: WorkerConfig) -> dict | None:
+def _load_latest_positions_payload_for_config(config: WorkerConfig) -> dict | None:
     try:
-        return load_positions_analysis_for_config(config)
+        if config.positions_payload_path is not None:
+            return json.loads(config.positions_payload_path.read_text())
+        if config.run_dir is not None:
+            return load_latest_positions_payload_from_run_dir(config.run_dir)
     except Exception:
         return None
+    return None
+
+
+def _should_prefer_fresh_positions(
+    *,
+    watcher_state: dict,
+    watcher_open_positions: list[dict],
+    fresh_positions_analysis: dict | None,
+    fresh_positions_payload: dict | None,
+) -> bool:
+    if fresh_positions_analysis is None:
+        return False
+    if _positions_missing_event_context(watcher_open_positions):
+        return True
+
+    fresh_positions = fresh_positions_analysis.get("positions") or []
+    if len(fresh_positions) != len(watcher_open_positions):
+        return True
+
+    watcher_updated_at = str(watcher_state.get("updated_at", "") or "")
+    fresh_captured_at = (
+        str(fresh_positions_payload.get("captured_at", "") or "")
+        if isinstance(fresh_positions_payload, dict)
+        else ""
+    )
+    if not watcher_updated_at or not fresh_captured_at:
+        return False
+
+    try:
+        watcher_updated = datetime.fromisoformat(
+            watcher_updated_at.replace("Z", "+00:00")
+        )
+        fresh_captured = datetime.fromisoformat(
+            fresh_captured_at.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    return fresh_captured > watcher_updated
 
 
 def load_exchange_snapshot_for_config(
@@ -1066,7 +1463,7 @@ def load_exchange_snapshot_for_config(
             config=config,
         )
 
-    if capture_live:
+    if capture_live and not _can_use_fresh_watcher_state_without_live_capture(config):
         capture_current_smarkets_open_positions(config)
     watcher_state = load_watcher_state(run_dir=config.run_dir)
     if watcher_state is not None:
@@ -1123,17 +1520,26 @@ def load_exchange_snapshot_for_config(
                 "stop_loss": config.stop_loss,
                 "watches": [],
             }
-            fresh_positions_analysis = None
             watcher_open_positions = watcher_state.get("open_positions", [])
-            if _positions_missing_event_context(watcher_open_positions):
-                fresh_positions_analysis = _load_fresh_positions_analysis(config)
+            fresh_positions_payload = _load_latest_positions_payload_for_config(config)
+            fresh_positions_analysis = (
+                analyze_positions_payload(fresh_positions_payload)
+                if fresh_positions_payload is not None
+                else None
+            )
+            prefer_fresh_positions = _should_prefer_fresh_positions(
+                watcher_state=watcher_state,
+                watcher_open_positions=watcher_open_positions,
+                fresh_positions_analysis=fresh_positions_analysis,
+                fresh_positions_payload=fresh_positions_payload,
+            )
 
             snapshot = build_exchange_panel_snapshot(watch)
             snapshot["worker"] = worker
             snapshot["account_stats"] = watcher_state.get("account_stats")
             snapshot["open_positions"] = (
                 fresh_positions_analysis["positions"]
-                if fresh_positions_analysis is not None
+                if prefer_fresh_positions
                 else watcher_open_positions
             )
             snapshot["historical_positions"] = load_historical_positions()
@@ -1161,7 +1567,11 @@ def load_exchange_snapshot_for_config(
             )
             snapshot["runtime"] = build_runtime_summary(
                 run_dir=config.run_dir,
-                positions_payload={"captured_at": watcher_state.get("updated_at", "")},
+                positions_payload=(
+                    fresh_positions_payload
+                    if prefer_fresh_positions and fresh_positions_payload is not None
+                    else {"captured_at": watcher_state.get("updated_at", "")}
+                ),
                 watcher_state=watcher_state,
             )
             snapshot["status_line"] = worker.get("detail") or snapshot["status_line"]
@@ -1219,6 +1629,33 @@ def load_exchange_snapshot_for_config(
             f"{watch['position_count']} positions."
         )
     return snapshot
+
+
+def _can_use_fresh_watcher_state_without_live_capture(config: WorkerConfig) -> bool:
+    if config.run_dir is None:
+        return False
+
+    watcher_state = load_watcher_state(run_dir=config.run_dir)
+    if watcher_state is None:
+        return False
+
+    worker = watcher_state.get("worker") or {}
+    if worker.get("status") != "ready":
+        return False
+
+    updated_at = str(watcher_state.get("updated_at", "") or "")
+    if not updated_at:
+        return False
+
+    interval_seconds = float(watcher_state.get("interval_seconds", 0) or 0)
+    try:
+        updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+
+    stale_after_seconds = max(interval_seconds * 3, interval_seconds + 5, 10)
+    is_stale = (datetime.now(UTC) - updated).total_seconds() > stale_after_seconds
+    return not is_stale
 
 
 def _is_historical_position_entry(entry: dict) -> bool:
@@ -1450,6 +1887,16 @@ def parse_worker_request(request: str | dict) -> tuple[str, dict | None]:
                 raise ValueError("CashOutTrackedBet payload must be an object.")
             return request_name, request_payload
 
+        if request_name == "ExecuteTradingAction":
+            if not isinstance(request_payload, dict):
+                raise ValueError("ExecuteTradingAction payload must be an object.")
+            return request_name, request_payload
+
+        if request_name == "LoadHorseMatcher":
+            if not isinstance(request_payload, dict):
+                raise ValueError("LoadHorseMatcher payload must be an object.")
+            return request_name, request_payload
+
     raise ValueError(f"Unsupported worker request: {request}")
 
 
@@ -1512,13 +1959,21 @@ def handle_worker_request(
             request_payload,
             config=config,
         )
-        response = {
-            "snapshot": load_exchange_snapshot_for_config(
+        try:
+            snapshot = load_exchange_snapshot_for_config(
                 resolved_config,
                 selected_venue=effective_selected_venue,
-                capture_live=True,
+                capture_live=False,
             )
-        }
+        except ValueError as exc:
+            if _should_return_waiting_snapshot(resolved_config, exc):
+                snapshot = build_waiting_for_watcher_snapshot(
+                    config=resolved_config,
+                    detail="Recorder started; waiting for first snapshot.",
+                )
+            else:
+                raise
+        response = {"snapshot": snapshot}
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue
@@ -1569,6 +2024,51 @@ def handle_worker_request(
         )
         response = {
             "snapshot": handle_cash_out_tracked_bet(snapshot=snapshot, bet_id=bet_id)
+        }
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, effective_selected_venue
+
+    if request_name == "ExecuteTradingAction":
+        assert request_payload is not None
+        try:
+            intent_payload = request_payload["intent"]
+        except KeyError as exc:
+            raise ValueError("ExecuteTradingAction payload must include intent.") from exc
+        if not isinstance(intent_payload, dict):
+            raise ValueError("ExecuteTradingAction intent must be an object.")
+        result = execute_trading_action(
+            intent_payload=intent_payload,
+            agent_browser_session=resolved_config.agent_browser_session,
+            run_dir=resolved_config.run_dir,
+        )
+        snapshot = load_exchange_snapshot_for_config(
+            resolved_config,
+            selected_venue="smarkets",
+            capture_live=True,
+        )
+        snapshot["worker"] = {
+            **dict(snapshot.get("worker") or {}),
+            "status": "ready",
+            "detail": result.detail,
+        }
+        snapshot["status_line"] = result.detail
+        response = {"snapshot": snapshot}
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, "smarkets"
+
+    if request_name == "LoadHorseMatcher":
+        assert request_payload is not None
+        query = request_payload.get("query")
+        if not isinstance(query, dict):
+            raise ValueError("LoadHorseMatcher payload must include query.")
+        market_snapshot = capture_live_horse_market_snapshot(query)
+        response = {
+            "snapshot": build_horse_matcher_snapshot_response(
+                market_snapshot=market_snapshot,
+                selected_venue=effective_selected_venue,
+            )
         }
         if selected_venue is None:
             return response, resolved_config

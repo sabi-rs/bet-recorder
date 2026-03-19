@@ -12,7 +12,12 @@ def build_smarkets_watch_plan(
   target_profit: float,
   stop_loss: float,
 ) -> dict:
-  grouped_positions = _group_positions(positions)
+  watchable_positions = [
+    position
+    for position in positions
+    if str(position.get("side", "sell")).lower() == "sell"
+  ]
+  grouped_positions = _group_positions(watchable_positions)
   watches = [
     _build_watch(
       contract=contract,

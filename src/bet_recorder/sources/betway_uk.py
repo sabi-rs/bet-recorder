@@ -30,6 +30,7 @@ class BetwayPageCapture:
   screenshot_path: str | None
   notes: list[str]
   captured_at: datetime
+  metadata: dict | None = None
 
 
 def capture_betway_page(bundle: RunBundle, capture: BetwayPageCapture) -> None:
@@ -55,5 +56,6 @@ def capture_betway_page(bundle: RunBundle, capture: BetwayPageCapture) -> None:
       screenshot_path=capture.screenshot_path,
       notes=capture.notes,
       captured_at=capture.captured_at,
+      metadata=capture.metadata or {},
     ),
   )

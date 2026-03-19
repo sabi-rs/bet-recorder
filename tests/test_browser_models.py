@@ -87,3 +87,26 @@ def test_browser_transport_event_to_payload_preserves_event_fields() -> None:
     "preview": '{"protocol":"blazorpack","version":1}',
     "metadata": {"url": "wss://vb.rebelbetting.com/_blazor?id=123"},
   }
+
+
+def test_browser_page_state_to_payload_includes_metadata_when_present() -> None:
+  state = BrowserPageState(
+    captured_at=datetime(2026, 3, 9, 10, 16, tzinfo=timezone.utc),
+    page="open_positions",
+    url="https://smarkets.com/portfolio",
+    document_title="Smarkets Predictions",
+    body_text="Portfolio",
+    interactive_snapshot=[],
+    links=[],
+    inputs={},
+    visible_actions=[],
+    resource_hosts=["smarkets.com"],
+    local_storage_keys=[],
+    screenshot_path=None,
+    notes=[],
+    metadata={"smarkets_portfolio": {"extractor": "dom-v1", "positions": []}},
+  )
+
+  assert state.to_payload()["metadata"] == {
+    "smarkets_portfolio": {"extractor": "dom-v1", "positions": []},
+  }

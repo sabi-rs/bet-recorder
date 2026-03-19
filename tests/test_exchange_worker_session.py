@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -832,7 +833,7 @@ def test_refresh_request_uses_run_dir_state_without_live_recap(
         config=resolved_config,
     )
 
-    assert capture_count == 1
+    assert capture_count == 0
     assert first_response["snapshot"]["runtime"]["source"] == "watcher-state"
     assert refresh_response["snapshot"]["runtime"]["source"] == "watcher-state"
     assert (
@@ -905,6 +906,109 @@ def test_load_exchange_snapshot_uses_watcher_state_runtime_when_available(
     assert snapshot["runtime"]["source"] == "watcher-state"
     assert snapshot["runtime"]["watcher_iteration"] == 9
     assert snapshot["runtime"]["decision_count"] == 1
+
+
+def test_load_exchange_snapshot_skips_live_capture_when_watcher_state_is_fresh(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-11T11:05:00Z",
+                "source": "smarkets_exchange",
+                "kind": "positions_snapshot",
+                "page": "open_positions",
+                "url": "https://smarkets.com/portfolio/?order-state=active",
+                "document_title": "Smarkets Predictions",
+                "body_text": (
+                    "Lazio vs Sassuolo "
+                    "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 "
+                    "(3.13%) Order filled Trade out Back 4.80"
+                ),
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+                "resource_hosts": ["smarkets.com"],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": [],
+            },
+        )
+        + "\n",
+    )
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2999-03-11T11:05:00Z",
+                "interval_seconds": 5.0,
+                "iteration": 9,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "watcher stable",
+                },
+                "open_positions": [
+                    {
+                        "contract": "Draw",
+                        "market": "Full-time result",
+                        "event": "Lazio vs Sassuolo",
+                        "event_status": "20 Mar 10:00 PM|Serie A",
+                    }
+                ],
+                "session": {
+                    "name": "helium-copy",
+                    "current_url": "https://smarkets.com/portfolio/?order-state=active",
+                    "document_title": "Smarkets Predictions",
+                    "page_hint": "open_positions",
+                    "open_positions_ready": True,
+                    "validation_error": None,
+                },
+                "watch": {
+                    "position_count": 1,
+                    "watch_count": 1,
+                    "commission_rate": 0.0,
+                    "target_profit": 1.0,
+                    "stop_loss": 1.0,
+                    "watches": [],
+                },
+                "decision_count": 1,
+                "decisions": [{"contract": "Draw", "status": "hold"}],
+            },
+        )
+        + "\n",
+    )
+
+    def fail_capture(config: WorkerConfig) -> None:
+        raise AssertionError("fresh watcher state should avoid live capture")
+
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_smarkets_open_positions",
+        fail_capture,
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session="helium-copy",
+        ),
+        capture_live=True,
+    )
+
+    assert snapshot["runtime"]["source"] == "watcher-state"
+    assert snapshot["worker"]["status"] == "ready"
 
 
 def test_load_exchange_snapshot_prefers_ready_watcher_state_positions(
@@ -1011,6 +1115,146 @@ def test_load_exchange_snapshot_prefers_ready_watcher_state_positions(
     assert snapshot["worker"]["status"] == "ready"
     assert snapshot["open_positions"][0]["current_score"] == "0-0"
     assert snapshot["open_positions"][0]["event_url"].endswith("/44919693/")
+
+
+def test_load_exchange_snapshot_prefers_newer_positions_payload_over_lagging_watcher_state(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-19T19:25:00Z",
+                "source": "smarkets_exchange",
+                "kind": "positions_snapshot",
+                "page": "open_positions",
+                "url": "https://smarkets.com/portfolio/?order-state=active",
+                "document_title": "Smarkets Predictions",
+                "body_text": (
+                    "15:32 - Newbury\n"
+                    "Tomorrow At 3:32 PM|Newbury\n"
+                    "Contract\n"
+                    "Price\n"
+                    "Stake/\n"
+                    "Liability\n"
+                    "Return\n"
+                    "Current Value\n"
+                    "Status\n"
+                    "Sell J J Moon\n"
+                    "To win\n"
+                    "7.2\n"
+                    "£8.33\n"
+                    "£51.64\n"
+                    "£59.97\n"
+                    "£7.57\n"
+                    "-£0.76 (9.12%)\n"
+                    "Order filled\n"
+                    "Brumbies vs Chiefs\n"
+                    "Tomorrow At 8:35 AM|Super Rugby\n"
+                    "Contract\n"
+                    "Price\n"
+                    "Stake/\n"
+                    "Liability\n"
+                    "Return\n"
+                    "Current Value\n"
+                    "Status\n"
+                    "Sell Brumbies\n"
+                    "Winner (including overtime)\n"
+                    "3.0\n"
+                    "£10.40\n"
+                    "£20.80\n"
+                    "£31.20\n"
+                    "£7.23\n"
+                    "-£3.17 (30.48%)\n"
+                    "Order filled\n"
+                    "Trade out\n"
+                    "Lazio vs Sassuolo\n"
+                    "Tomorrow At 10:00 PM|Serie A\n"
+                    "Contract\n"
+                    "Price\n"
+                    "Stake/\n"
+                    "Liability\n"
+                    "Return\n"
+                    "Current Value\n"
+                    "Status\n"
+                    "Sell Draw\n"
+                    "Full-time result\n"
+                    "3.35\n"
+                    "£9.91\n"
+                    "£23.29\n"
+                    "£33.20\n"
+                    "£9.60\n"
+                    "-£1.31 (3.13%)\n"
+                    "Order filled\n"
+                    "Trade out\n"
+                ),
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+                "resource_hosts": ["smarkets.com"],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": ["exchange-worker-refresh", "scroll-capture"],
+            },
+        )
+        + "\n",
+    )
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-03-19T19:24:00Z",
+                "interval_seconds": 5.0,
+                "iteration": 42,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "watcher stable",
+                },
+                "open_positions": [
+                    {"contract": "J J Moon", "market": "To win"},
+                    {"contract": "Brumbies", "market": "Winner (including overtime)"},
+                ],
+                "session": {
+                    "name": "helium-copy",
+                    "current_url": "https://smarkets.com/portfolio/?order-state=active",
+                    "document_title": "Smarkets Predictions",
+                    "page_hint": "open_positions",
+                    "open_positions_ready": True,
+                    "validation_error": None,
+                },
+                "decision_count": 2,
+                "decisions": [{"contract": "J J Moon"}, {"contract": "Brumbies"}],
+            },
+        )
+        + "\n",
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        capture_live=False,
+    )
+
+    assert len(snapshot["open_positions"]) == 3
+    assert [position["contract"] for position in snapshot["open_positions"]] == [
+        "J J Moon",
+        "Brumbies",
+        "Draw",
+    ]
+    assert snapshot["runtime"]["source"] == "watcher-state"
 
 
 def test_exchange_worker_session_reports_session_page_diagnostics(
@@ -1397,6 +1641,101 @@ def test_load_exchange_snapshot_handles_missing_live_tab_gracefully() -> None:
     assert snapshot["other_open_bets"] == []
     assert snapshot["worker"]["status"] == "error"
     assert "Could not find a CDP target" in snapshot["status_line"]
+
+
+@pytest.mark.parametrize(
+    ("venue", "url", "document_title", "body_text", "expected_label"),
+    [
+        (
+            "betfred",
+            "https://www.betfred.com/sport/my-bets",
+            "Betfred My Bets",
+            "My Bets\nOpen\nCash Out\nEverton v Liverpool\nLiverpool\n7/4\nMatch Result\nStake\n£12.00",
+            "Liverpool",
+        ),
+        (
+            "coral",
+            "https://sports.coral.co.uk/my-bets",
+            "Coral My Bets",
+            "Open Bets\nCheltenham 15:20\nDesert Hero\n3.50\nWin Market\nStake\n£8.00\nCash Out",
+            "Desert Hero",
+        ),
+        (
+            "ladbrokes",
+            "https://sports.ladbrokes.com/my-bets",
+            "Ladbrokes My Bets",
+            "My Bets\nArsenal v Everton\nArsenal\n2.40\nMatch Odds\n£10.00\nCash Out",
+            "Arsenal",
+        ),
+        (
+            "kwik",
+            "https://sports.kwiff.com/my-bets",
+            "Kwik My Bets",
+            "Open Bets\nEngland v France\nFrance\n2.80\nMatch Odds\n£5.00",
+            "France",
+        ),
+        (
+            "bet600",
+            "https://www.bet600.co.uk/my-bets",
+            "Bet600 My Bets",
+            "My Bets\nOpen\nBarcelona v Real Madrid\nBoth Teams To Score\n1.95\nSpecials\n£7.50",
+            "Both Teams To Score",
+        ),
+    ],
+)
+def test_load_exchange_snapshot_supports_added_live_bookmaker_payloads(
+    monkeypatch,
+    venue: str,
+    url: str,
+    document_title: str,
+    body_text: str,
+    expected_label: str,
+) -> None:
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_live_venue_payload",
+        lambda requested_venue: {
+            "page": "my_bets",
+            "url": url,
+            "document_title": document_title,
+            "body_text": body_text,
+            "inputs": {},
+            "visible_actions": ["My Bets", "Cash Out"],
+            "captured_at": "2026-03-19T08:15:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.list_debug_targets",
+        lambda: [
+            DebugTarget(
+                target_id=f"{venue}-live",
+                target_type="page",
+                title=document_title,
+                url=url,
+                websocket_debugger_url=f"ws://example.invalid/{venue}",
+            )
+        ],
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=Path("/tmp/unused-positions.json"),
+            run_dir=None,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        selected_venue=venue,
+    )
+
+    assert snapshot["selected_venue"] == venue
+    assert snapshot["worker"]["status"] == "ready"
+    assert snapshot["other_open_bets"][0]["label"] == expected_label
 
 
 def fixture_text(name: str) -> str:

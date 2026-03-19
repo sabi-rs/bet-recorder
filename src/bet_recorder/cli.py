@@ -17,6 +17,13 @@ from bet_recorder.browser.cdp import DEFAULT_DEBUG_BASE_URL
 from bet_recorder.analysis.bet365 import analyze_bet365_page
 from bet_recorder.analysis.betuk import analyze_betuk_page
 from bet_recorder.analysis.betway_uk import analyze_betway_page
+from bet_recorder.analysis.generic_sportsbooks import (
+    analyze_bet600_page,
+    analyze_betfred_page,
+    analyze_coral_page,
+    analyze_kwik_page,
+    analyze_ladbrokes_page,
+)
 from bet_recorder.analysis.position_watch import build_smarkets_watch_plan
 from bet_recorder.analysis.smarkets_exchange import analyze_smarkets_page
 from bet_recorder.analysis.trade_out import lay_position_trade_out
@@ -87,6 +94,41 @@ def extract_page(
         )
     elif source == "betway_uk":
         analysis = analyze_betway_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "betfred":
+        analysis = analyze_betfred_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "coral":
+        analysis = analyze_coral_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "ladbrokes":
+        analysis = analyze_ladbrokes_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "kwik":
+        analysis = analyze_kwik_page(
+            page=payload["page"],
+            body_text=payload["body_text"],
+            inputs=payload.get("inputs", {}),
+            visible_actions=payload.get("visible_actions", []),
+        )
+    elif source == "bet600":
+        analysis = analyze_bet600_page(
             page=payload["page"],
             body_text=payload["body_text"],
             inputs=payload.get("inputs", {}),

@@ -19,11 +19,17 @@ POSITION_RE = re.compile(
     re.I,
 )
 AVAILABLE_BALANCE_RE = re.compile(
-    r"Available balance\s+£(?P<amount>\d+(?:\.\d+)?)", re.I
+    r"(?:Available balance|Your balance)\s+£(?P<amount>\d+(?:,\d{3})*(?:\.\d+)?)", re.I
 )
-EXPOSURE_RE = re.compile(r"Exposure\s+£(?P<amount>\d+(?:\.\d+)?)", re.I)
+EXPOSURE_RE = re.compile(
+    r"Exposure(?:\s+Deposit\s+Withdraw)?\s+£(?P<amount>\d+(?:,\d{3})*(?:\.\d+)?)", re.I
+)
 UNREALIZED_PNL_RE = re.compile(
-    r"Unrealized P/L\s+(?P<sign>-?)£(?P<amount>\d+(?:\.\d+)?)",
+    r"(?:Unrealized P/L|Profit\s*&\s*Loss)\s+(?P<sign>-?)£(?P<amount>\d+(?:,\d{3})*(?:\.\d+)?)",
+    re.I,
+)
+CUMULATIVE_PNL_RE = re.compile(
+    r"P&L since\s+(?P<label>[^\n]+?)\s+£(?P<amount>\d+(?:,\d{3})*(?:\.\d+)?)",
     re.I,
 )
 OPEN_BET_RE = re.compile(
@@ -40,6 +46,13 @@ LIVE_EVENT_STATUS_RE = re.compile(
     re.I,
 )
 PENDING_EVENT_STATUS_RE = re.compile(r"^(?:Today|Tomorrow)\s+At\s+\d{1,2}:\d{2}\b", re.I)
+SCHEDULED_EVENT_STATUS_RE = re.compile(
+    r"^(?:In\s+\d+\s+Minutes?|"
+    r"\d{1,2}\s+[A-Za-z]{3}\s+\d{1,2}:\d{2}\s*(?:AM|PM)|"
+    r"\d{1,2}:\d{2}\s*-\s+.+)"
+    r"(?=$|\||\s)",
+    re.I,
+)
 ENDED_EVENT_STATUS_RE = re.compile(r"^Event ended\b", re.I)
 MONEY_LINE_RE = re.compile(r"^£(?P<amount>\d+(?:\.\d+)?)$")
 PNL_LINE_RE = re.compile(
@@ -259,6 +272,7 @@ def _looks_like_event_status(value: str) -> bool:
         and (
             LIVE_EVENT_STATUS_RE.match(normalized) is not None
             or PENDING_EVENT_STATUS_RE.match(normalized) is not None
+            or SCHEDULED_EVENT_STATUS_RE.match(normalized) is not None
             or ENDED_EVENT_STATUS_RE.match(normalized) is not None
         )
     )
@@ -280,6 +294,8 @@ def _market_status(*, can_trade_out: bool, event_status: str | None) -> str:
     if _event_status_is_live(normalized):
         return "suspended"
     if PENDING_EVENT_STATUS_RE.match(normalized) is not None:
+        return "pre_event"
+    if SCHEDULED_EVENT_STATUS_RE.match(normalized) is not None:
         return "pre_event"
     if ENDED_EVENT_STATUS_RE.match(normalized) is not None:
         return "settled"
@@ -307,6 +323,7 @@ def _extract_account_stats(body_text: str) -> dict | None:
     available_balance_match = AVAILABLE_BALANCE_RE.search(body_text)
     exposure_match = EXPOSURE_RE.search(body_text)
     unrealized_pnl_match = UNREALIZED_PNL_RE.search(body_text)
+    cumulative_pnl_match = CUMULATIVE_PNL_RE.search(body_text)
     if (
         available_balance_match is None
         or exposure_match is None
@@ -319,9 +336,21 @@ def _extract_account_stats(body_text: str) -> dict | None:
         unrealized_pnl = -unrealized_pnl
 
     return {
-        "available_balance": float(available_balance_match.group("amount")),
-        "exposure": float(exposure_match.group("amount")),
+        "available_balance": float(
+            available_balance_match.group("amount").replace(",", "")
+        ),
+        "exposure": float(exposure_match.group("amount").replace(",", "")),
         "unrealized_pnl": unrealized_pnl,
+        "cumulative_pnl": (
+            float(cumulative_pnl_match.group("amount").replace(",", ""))
+            if cumulative_pnl_match is not None
+            else None
+        ),
+        "cumulative_pnl_label": (
+            f"P&L since {cumulative_pnl_match.group('label').strip()}"
+            if cumulative_pnl_match is not None
+            else ""
+        ),
         "currency": "GBP",
     }
 

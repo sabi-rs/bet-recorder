@@ -26,7 +26,7 @@ def test_init_run_creates_bundle_and_prints_metadata_path(tmp_path: Path) -> Non
     [
       "init-run",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--root-dir",
       str(tmp_path),
       "--started-at",
@@ -43,7 +43,7 @@ def test_init_run_creates_bundle_and_prints_metadata_path(tmp_path: Path) -> Non
 
   payload = json.loads(result.output)
 
-  assert payload["source"] == "rebelbetting_vb"
+  assert payload["source"] == "betway_uk"
   assert payload["transport_capture_enabled"] is True
   assert Path(payload["run_dir"]).is_dir()
   assert Path(payload["metadata_path"]).is_file()
@@ -59,7 +59,7 @@ def test_record_page_appends_event_and_finalize_run_updates_metadata(
     [
       "init-run",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--root-dir",
       str(tmp_path),
       "--started-at",
@@ -73,22 +73,22 @@ def test_record_page_appends_event_and_finalize_run_updates_metadata(
   assert init_result.exit_code == 0
   init_payload = json.loads(init_result.output)
 
-  payload_path = tmp_path / "vb-dashboard.json"
+  payload_path = tmp_path / "betway-market.json"
   payload_path.write_text(
     json.dumps(
       {
-        "page": "dashboard",
-        "url": "https://vb.rebelbetting.com/",
-        "document_title": "Value betting by RebelBetting",
-        "body_text": "25 value bets",
-        "interactive_snapshot": [{"tag": "A", "text": "Filters"}],
-        "links": ["https://vb.rebelbetting.com/filters"],
-        "inputs": {"search": ""},
-        "visible_actions": ["Filters"],
-        "resource_hosts": ["vb.rebelbetting.com"],
-        "local_storage_keys": ["Token"],
-        "screenshot_path": "/tmp/dashboard.png",
-        "notes": ["trial-mode"],
+        "page": "market",
+        "url": "https://betway.com/gb/en/sports/event/16431700?marketGroup=SGP",
+        "document_title": "Betway event",
+        "body_text": "Almeria Correct Score",
+        "interactive_snapshot": [{"tag": "BUTTON", "text": "Add to Bet Slip"}],
+        "links": ["https://betway.com/gb/en/sports"],
+        "inputs": {"stake": ""},
+        "visible_actions": ["Add to Bet Slip"],
+        "resource_hosts": ["betway.com"],
+        "local_storage_keys": ["theme"],
+        "screenshot_path": "/tmp/market.png",
+        "notes": ["free-bet"],
         "captured_at": "2026-03-09T10:16:00Z",
       },
     ),
@@ -99,7 +99,7 @@ def test_record_page_appends_event_and_finalize_run_updates_metadata(
     [
       "record-page",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--run-dir",
       init_payload["run_dir"],
       "--payload-path",
@@ -113,7 +113,7 @@ def test_record_page_appends_event_and_finalize_run_updates_metadata(
     [
       "finalize-run",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--run-dir",
       init_payload["run_dir"],
       "--ended-at",
@@ -127,7 +127,7 @@ def test_record_page_appends_event_and_finalize_run_updates_metadata(
 
   assert metadata["ended_at"] == "2026-03-09T10:20:00Z"
   assert metadata["page_count"] == 1
-  assert event["kind"] == "dashboard_snapshot"
+  assert event["kind"] == "market_snapshot"
 
 
 def test_record_transport_appends_sanitized_event(tmp_path: Path) -> None:
@@ -138,7 +138,7 @@ def test_record_transport_appends_sanitized_event(tmp_path: Path) -> None:
     [
       "init-run",
       "--source",
-      "rebelbetting_vb",
+      "smarkets_exchange",
       "--root-dir",
       str(tmp_path),
       "--started-at",
@@ -172,7 +172,7 @@ def test_record_transport_appends_sanitized_event(tmp_path: Path) -> None:
     [
       "record-transport",
       "--source",
-      "rebelbetting_vb",
+      "smarkets_exchange",
       "--run-dir",
       init_payload["run_dir"],
       "--payload-path",
@@ -264,7 +264,7 @@ def test_manual_capture_workflow_preserves_payload_contract(tmp_path: Path) -> N
     [
       "init-run",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--root-dir",
       str(tmp_path),
       "--started-at",
@@ -281,20 +281,20 @@ def test_manual_capture_workflow_preserves_payload_contract(tmp_path: Path) -> N
 
   page_payload = {
     "captured_at": "2026-03-09T10:16:00Z",
-    "page": "dashboard",
-    "url": "https://vb.rebelbetting.com/",
-    "document_title": "Value betting by RebelBetting",
-    "body_text": "25 value bets",
-    "interactive_snapshot": [{"tag": "A", "text": "Filters"}],
-    "links": ["https://vb.rebelbetting.com/filters"],
-    "inputs": {"search": ""},
-    "visible_actions": ["Filters"],
-    "resource_hosts": ["vb.rebelbetting.com"],
-    "local_storage_keys": ["Token"],
-    "screenshot_path": "/tmp/dashboard.png",
-    "notes": ["trial-mode"],
+    "page": "market",
+    "url": "https://betway.com/gb/en/sports/event/16431700?marketGroup=SGP",
+    "document_title": "Betway event",
+    "body_text": "Almeria Correct Score",
+    "interactive_snapshot": [{"tag": "BUTTON", "text": "Add to Bet Slip"}],
+    "links": ["https://betway.com/gb/en/sports"],
+    "inputs": {"stake": ""},
+    "visible_actions": ["Add to Bet Slip"],
+    "resource_hosts": ["betway.com"],
+    "local_storage_keys": ["theme"],
+    "screenshot_path": "/tmp/market.png",
+    "notes": ["free-bet"],
   }
-  payload_path = tmp_path / "vb-dashboard.json"
+  payload_path = tmp_path / "betway-market.json"
   payload_path.write_text(json.dumps(page_payload))
 
   record_page_result = runner.invoke(
@@ -302,7 +302,7 @@ def test_manual_capture_workflow_preserves_payload_contract(tmp_path: Path) -> N
     [
       "record-page",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--run-dir",
       init_payload["run_dir"],
       "--payload-path",
@@ -327,7 +327,7 @@ def test_manual_capture_workflow_preserves_payload_contract(tmp_path: Path) -> N
     [
       "record-transport",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--run-dir",
       init_payload["run_dir"],
       "--payload-path",
@@ -341,7 +341,7 @@ def test_manual_capture_workflow_preserves_payload_contract(tmp_path: Path) -> N
     [
       "finalize-run",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--run-dir",
       init_payload["run_dir"],
       "--ended-at",
@@ -364,8 +364,8 @@ def test_manual_capture_workflow_preserves_payload_contract(tmp_path: Path) -> N
 
   assert len(events) == 1
   assert events[0]["captured_at"] == page_payload["captured_at"]
-  assert events[0]["source"] == "rebelbetting_vb"
-  assert events[0]["kind"] == "dashboard_snapshot"
+  assert events[0]["source"] == "betway_uk"
+  assert events[0]["kind"] == "market_snapshot"
   assert events[0]["page"] == page_payload["page"]
   assert events[0]["url"] == page_payload["url"]
   assert events[0]["document_title"] == page_payload["document_title"]

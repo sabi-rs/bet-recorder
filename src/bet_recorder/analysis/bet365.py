@@ -109,7 +109,8 @@ def _extract_open_bets(lines: list[str]) -> list[dict]:
         "status": "cash_out" if net_return is not None else "open",
         "bet_type": bet_type.lower(),
         "event": event,
-        "net_return": net_return,
+        "current_cashout_value": net_return,
+        "supports_cash_out": net_return is not None,
       }
     )
 

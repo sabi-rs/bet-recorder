@@ -367,6 +367,7 @@ def build_exchange_panel_snapshot(watch: dict) -> dict:
         "account_stats": None,
         "open_positions": [],
         "historical_positions": [],
+        "ledger_pnl_summary": load_ledger_pnl_summary(),
         "other_open_bets": [],
         "decisions": [],
         "watch": watch,
@@ -452,8 +453,11 @@ def build_live_venue_snapshot(
         "account_stats": None,
         "open_positions": [],
         "historical_positions": load_historical_positions(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(),
         "other_open_bets": [
             {
+                "venue": venue,
+                "event": str(row.get("event", "")),
                 "label": str(row.get("label", "")),
                 "market": str(row.get("market", "")),
                 "side": str(row.get("side", "back")),
@@ -516,6 +520,7 @@ def build_unavailable_live_venue_snapshot(
         "account_stats": None,
         "open_positions": [],
         "historical_positions": load_historical_positions(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(),
         "other_open_bets": [],
         "decisions": [],
         "watch": None,
@@ -711,6 +716,12 @@ def load_account_stats(payload_path: Path | None) -> dict | None:
         "available_balance": float(payload["available_balance"]),
         "exposure": float(payload["exposure"]),
         "unrealized_pnl": float(payload["unrealized_pnl"]),
+        "cumulative_pnl": (
+            float(payload["cumulative_pnl"])
+            if payload.get("cumulative_pnl") is not None
+            else None
+        ),
+        "cumulative_pnl_label": str(payload.get("cumulative_pnl_label", "")),
         "currency": str(payload["currency"]),
     }
 
@@ -724,15 +735,81 @@ def load_other_open_bets(payload_path: Path | None) -> list[dict]:
         raise ValueError("Open bets payload must contain a bets list.")
     return [
         {
+            "venue": str(bet.get("venue", "")),
+            "event": str(bet.get("event", "")),
             "label": str(bet["label"]),
             "market": str(bet["market"]),
             "side": str(bet["side"]),
             "odds": float(bet["odds"]),
             "stake": float(bet["stake"]),
             "status": str(bet["status"]),
+            "current_cashout_value": _optional_float(bet.get("current_cashout_value")),
+            "supports_cash_out": bool(bet.get("supports_cash_out", False)),
         }
         for bet in bets
     ]
+
+
+def capture_live_other_open_bets() -> list[dict]:
+    collected: list[dict] = []
+    for venue in ("bet365", "betdaq", "betfred", "betway", "betuk"):
+        try:
+            payload = capture_current_live_venue_payload(venue)
+            analysis = analyze_live_venue_payload(venue, payload)
+        except Exception:
+            continue
+
+        for row in analysis.get("open_bets", []):
+            collected.append(
+                {
+                    "venue": venue,
+                    "event": str(row.get("event", "")),
+                    "label": str(row.get("label", "")),
+                    "market": str(row.get("market", "")),
+                    "side": str(row.get("side", "back")),
+                    "odds": float(row.get("odds", 0.0)),
+                    "stake": float(row.get("stake", 0.0)),
+                    "status": str(row.get("status", "open")),
+                    "current_cashout_value": _optional_float(row.get("current_cashout_value")),
+                    "supports_cash_out": bool(row.get("supports_cash_out", False)),
+                }
+            )
+    return collected
+
+
+def merge_other_open_bets(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str, str, str, float, float, str]] = set()
+
+    for row in [*(primary or []), *(secondary or [])]:
+        normalized = {
+            "venue": str(row.get("venue", "")),
+            "event": str(row.get("event", "")),
+            "label": str(row.get("label", "")),
+            "market": str(row.get("market", "")),
+            "side": str(row.get("side", "back")),
+            "odds": float(row.get("odds", 0.0)),
+            "stake": float(row.get("stake", 0.0)),
+            "status": str(row.get("status", "open")),
+            "current_cashout_value": _optional_float(row.get("current_cashout_value")),
+            "supports_cash_out": bool(row.get("supports_cash_out", False)),
+        }
+        dedupe_key = (
+            normalized["venue"],
+            normalized["event"],
+            normalized["label"],
+            normalized["market"],
+            normalized["odds"],
+            normalized["stake"],
+            normalized["status"],
+            normalized["current_cashout_value"],
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        merged.append(normalized)
+
+    return merged
 
 
 def load_historical_positions(payload_path: Path | None = None) -> list[dict]:
@@ -749,12 +826,7 @@ def load_historical_positions(payload_path: Path | None = None) -> list[dict]:
     for entry in entries:
         if not _is_historical_position_group_member(entry):
             continue
-        occurred_day = str(entry.get("occurred_at", ""))[:10]
-        group_key = (
-            occurred_day,
-            str(entry.get("event", "") or "").strip().lower(),
-            str(entry.get("market", "") or "").strip().lower(),
-        )
+        group_key = _historical_position_group_key(entry)
         grouped_entries.setdefault(group_key, []).append(entry)
 
     historical_positions = [
@@ -770,6 +842,176 @@ def load_historical_positions(payload_path: Path | None = None) -> list[dict]:
     return historical_positions
 
 
+def load_ledger_pnl_summary(payload_path: Path | None = None) -> dict:
+    candidate_path = payload_path or DEFAULT_LEDGER_HISTORY_PATH
+    if candidate_path is None or not candidate_path.exists():
+        return _empty_ledger_pnl_summary()
+
+    payload = json.loads(candidate_path.read_text())
+    entries = payload.get("ledger_entries")
+    if not isinstance(entries, list):
+        return _empty_ledger_pnl_summary()
+
+    rows: list[tuple[str, str, float, str, str, str]] = []
+    exchange_total = 0.0
+    sportsbook_total = 0.0
+    promo_total = 0.0
+    standard_count = 0
+    promo_count = 0
+    unknown_count = 0
+
+    for entry in entries:
+        platform_kind = str(entry.get("platform_kind", "") or "")
+        if platform_kind not in {"exchange", "sportsbook"}:
+            continue
+
+        pnl_value = entry.get("realised_pnl_gbp")
+        if pnl_value in (None, ""):
+            continue
+
+        pnl_amount = _optional_float(pnl_value)
+        if pnl_amount is None:
+            continue
+
+        funding_kind = _classify_ledger_funding_kind(entry)
+        occurred_at = str(entry.get("occurred_at", "") or "")
+        entry_id = str(entry.get("entry_id", "") or "")
+        platform = str(entry.get("platform", "") or "")
+
+        if platform_kind == "exchange":
+            exchange_total += pnl_amount
+        else:
+            sportsbook_total += pnl_amount
+
+        if funding_kind == "promo":
+            promo_count += 1
+            promo_total += pnl_amount
+        elif funding_kind == "standard":
+            standard_count += 1
+        else:
+            unknown_count += 1
+
+        rows.append((occurred_at, entry_id, pnl_amount, platform, platform_kind, funding_kind))
+
+    rows.sort(key=lambda row: (row[0], row[1]))
+
+    cumulative_total = 0.0
+    cumulative_promo = 0.0
+    points = []
+    for occurred_at, entry_id, pnl_amount, platform, platform_kind, funding_kind in rows:
+        cumulative_total += pnl_amount
+        if funding_kind == "promo":
+            cumulative_promo += pnl_amount
+        points.append(
+            {
+                "occurred_at": occurred_at,
+                "entry_id": entry_id,
+                "platform": platform,
+                "platform_kind": platform_kind,
+                "delta": pnl_amount,
+                "total": cumulative_total,
+                "promo_total": cumulative_promo,
+                "funding_kind": funding_kind,
+            }
+        )
+
+    return {
+        "realised_total": cumulative_total,
+        "exchange_total": exchange_total,
+        "sportsbook_total": sportsbook_total,
+        "promo_total": promo_total,
+        "settled_count": len(rows),
+        "standard_count": standard_count,
+        "promo_count": promo_count,
+        "unknown_count": unknown_count,
+        "points": points,
+    }
+
+
+def _empty_ledger_pnl_summary() -> dict:
+    return {
+        "realised_total": 0.0,
+        "exchange_total": 0.0,
+        "sportsbook_total": 0.0,
+        "promo_total": 0.0,
+        "settled_count": 0,
+        "standard_count": 0,
+        "promo_count": 0,
+        "unknown_count": 0,
+        "points": [],
+    }
+
+
+def _classify_ledger_funding_kind(entry: dict) -> str:
+    activity_type = str(entry.get("activity_type", "") or "").strip().lower()
+    text_parts = [
+        activity_type,
+        str(entry.get("description", "") or ""),
+        str(entry.get("bet_type", "") or ""),
+        str(entry.get("market", "") or ""),
+        str(entry.get("selection", "") or ""),
+        str(entry.get("source_kind", "") or ""),
+    ]
+    raw_fields = entry.get("raw_fields") or {}
+    if isinstance(raw_fields, dict):
+        text_parts.extend(str(value) for value in raw_fields.values() if value not in (None, ""))
+    haystack = " ".join(text_parts).lower()
+
+    if any(
+        keyword in haystack
+        for keyword in (
+            "free bet",
+            "freebet",
+            "snr",
+            "stake returned",
+            "risk free",
+            "refund",
+            "promo",
+            "promotion",
+            "bonus",
+            "boost",
+        )
+    ):
+        return "promo"
+
+    if activity_type in {
+        "bet_settled",
+        "market_settled",
+        "bet_won",
+        "bet_lost",
+        "exchange_settlement",
+        "cash_out",
+    }:
+        return "standard"
+
+    if any(keyword in haystack for keyword in ("qualifying", "cash", "normal")):
+        return "standard"
+
+    return "unknown"
+
+
+def _historical_position_group_key(entry: dict) -> tuple[str, str, str]:
+    for key_name, prefix in (
+        ("group_id", "group"),
+        ("bet_id", "bet"),
+        ("reference", "reference"),
+        ("entry_id", "entry"),
+    ):
+        value = str(entry.get(key_name, "") or "").strip()
+        if value:
+            return (
+                prefix,
+                value,
+                str(entry.get("selection", "") or "").strip().lower(),
+            )
+
+    return (
+        str(entry.get("occurred_at", "") or "").strip(),
+        str(entry.get("event", "") or "").strip().lower(),
+        str(entry.get("market", "") or "").strip().lower(),
+    )
+
+
 def load_watcher_state(*, run_dir: Path | None) -> dict | None:
     if run_dir is None:
         return None
@@ -779,6 +1021,26 @@ def load_watcher_state(*, run_dir: Path | None) -> dict | None:
         return None
 
     return json.loads(watcher_state_path.read_text())
+
+
+def _positions_missing_event_context(positions: list[dict]) -> bool:
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        if (
+            not str(position.get("event", "") or "").strip()
+            or not str(position.get("event_status", "") or "").strip()
+            or not str(position.get("event_url", "") or "").strip()
+        ):
+            return True
+    return False
+
+
+def _load_fresh_positions_analysis(config: WorkerConfig) -> dict | None:
+    try:
+        return load_positions_analysis_for_config(config)
+    except Exception:
+        return None
 
 
 def load_exchange_snapshot_for_config(
@@ -861,12 +1123,25 @@ def load_exchange_snapshot_for_config(
                 "stop_loss": config.stop_loss,
                 "watches": [],
             }
+            fresh_positions_analysis = None
+            watcher_open_positions = watcher_state.get("open_positions", [])
+            if _positions_missing_event_context(watcher_open_positions):
+                fresh_positions_analysis = _load_fresh_positions_analysis(config)
+
             snapshot = build_exchange_panel_snapshot(watch)
             snapshot["worker"] = worker
             snapshot["account_stats"] = watcher_state.get("account_stats")
-            snapshot["open_positions"] = watcher_state.get("open_positions", [])
+            snapshot["open_positions"] = (
+                fresh_positions_analysis["positions"]
+                if fresh_positions_analysis is not None
+                else watcher_open_positions
+            )
             snapshot["historical_positions"] = load_historical_positions()
-            snapshot["other_open_bets"] = watcher_state.get("other_open_bets", [])
+            snapshot["ledger_pnl_summary"] = load_ledger_pnl_summary()
+            snapshot["other_open_bets"] = merge_other_open_bets(
+                watcher_state.get("other_open_bets", []),
+                capture_live_other_open_bets(),
+            )
             snapshot["decisions"] = watcher_state.get("decisions", [])
             snapshot["watch"] = watcher_state.get("watch")
             snapshot["tracked_bets"] = load_tracked_bets(config.companion_legs_path)
@@ -912,9 +1187,11 @@ def load_exchange_snapshot_for_config(
     ) or load_account_stats(config.account_payload_path)
     snapshot["open_positions"] = positions_analysis["positions"]
     snapshot["historical_positions"] = load_historical_positions()
-    snapshot["other_open_bets"] = positions_analysis.get(
-        "other_open_bets"
-    ) or load_other_open_bets(config.open_bets_payload_path)
+    snapshot["ledger_pnl_summary"] = load_ledger_pnl_summary()
+    snapshot["other_open_bets"] = (
+        positions_analysis.get("other_open_bets")
+        or load_other_open_bets(config.open_bets_payload_path)
+    )
     snapshot["decisions"] = load_decisions(run_dir=config.run_dir)
     snapshot["tracked_bets"] = load_tracked_bets(config.companion_legs_path)
     snapshot["exit_recommendations"] = build_exit_recommendations(

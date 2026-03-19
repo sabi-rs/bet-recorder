@@ -6,24 +6,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bet_recorder.sources.profiles import get_source_profile  # noqa: E402
 
 
-def test_rebelbetting_vb_profile_exposes_supported_pages_and_transport_policy() -> None:
-  profile = get_source_profile("rebelbetting_vb")
+def test_bet365_profile_exposes_my_bets_page_without_transport() -> None:
+  profile = get_source_profile("bet365")
 
-  assert profile.source == "rebelbetting_vb"
-  assert profile.supported_pages == ("dashboard", "filters", "bookmakers", "reports")
-  assert profile.transport_capture_default is True
-  assert profile.screenshot_required is True
-  assert profile.minimum_pages == ("dashboard", "filters", "bookmakers", "reports")
-
-
-def test_fairodds_profile_exposes_ui_state_pages_without_transport() -> None:
-  profile = get_source_profile("fairodds_terminal")
-
-  assert profile.source == "fairodds_terminal"
-  assert profile.supported_pages == ("drops", "ev", "sidebar")
+  assert profile.source == "bet365"
+  assert profile.supported_pages == ("my_bets",)
   assert profile.transport_capture_default is False
   assert profile.screenshot_required is True
-  assert profile.minimum_pages == ("drops", "ev", "sidebar")
+  assert profile.minimum_pages == ("my_bets",)
 
 
 def test_betway_profile_exposes_betslip_and_confirmation_pages() -> None:

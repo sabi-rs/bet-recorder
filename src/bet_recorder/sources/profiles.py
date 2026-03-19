@@ -13,43 +13,6 @@ class SourceCaptureProfile:
 
 
 SOURCE_PROFILES = {
-  "rebelbetting_vb": SourceCaptureProfile(
-    source="rebelbetting_vb",
-    supported_pages=("dashboard", "filters", "bookmakers", "reports"),
-    transport_capture_default=True,
-    screenshot_required=True,
-    minimum_pages=("dashboard", "filters", "bookmakers", "reports"),
-  ),
-  "rebelbetting_rb": SourceCaptureProfile(
-    source="rebelbetting_rb",
-    supported_pages=("dashboard", "filters", "bookmakers", "reports"),
-    transport_capture_default=True,
-    screenshot_required=True,
-    minimum_pages=("dashboard", "filters", "bookmakers", "reports"),
-  ),
-  "fairodds_terminal": SourceCaptureProfile(
-    source="fairodds_terminal",
-    supported_pages=("drops", "ev", "sidebar"),
-    transport_capture_default=False,
-    screenshot_required=True,
-    minimum_pages=("drops", "ev", "sidebar"),
-  ),
-  "profitmaximiser_members": SourceCaptureProfile(
-    source="profitmaximiser_members",
-    supported_pages=(
-      "home",
-      "training",
-      "tools",
-      "calculator",
-      "offer_table",
-      "calendar",
-      "settings",
-      "utility",
-    ),
-    transport_capture_default=False,
-    screenshot_required=True,
-    minimum_pages=("home", "tools", "offer_table", "calculator"),
-  ),
   "betway_uk": SourceCaptureProfile(
     source="betway_uk",
     supported_pages=("market", "betslip", "confirmation", "my_bets", "settlement"),

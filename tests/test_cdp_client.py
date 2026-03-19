@@ -19,15 +19,15 @@ def test_list_debug_targets_parses_devtools_endpoint() -> None:
         {
           "id": "page-1",
           "type": "page",
-          "title": "Value betting by RebelBetting",
-          "url": "https://vb.rebelbetting.com/user",
+          "title": "Smarkets",
+          "url": "https://smarkets.com/event/123",
           "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/page-1",
         },
         {
           "id": "worker-1",
           "type": "service_worker",
           "title": "worker",
-          "url": "https://vb.rebelbetting.com/sw.js",
+          "url": "https://smarkets.com/sw.js",
           "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/worker-1",
         },
       ],
@@ -39,8 +39,8 @@ def test_list_debug_targets_parses_devtools_endpoint() -> None:
     DebugTarget(
       target_id="page-1",
       target_type="page",
-      title="Value betting by RebelBetting",
-      url="https://vb.rebelbetting.com/user",
+      title="Smarkets",
+      url="https://smarkets.com/event/123",
       websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/page-1",
     ),
   ]
@@ -49,25 +49,25 @@ def test_list_debug_targets_parses_devtools_endpoint() -> None:
 def test_select_debug_target_prefers_explicit_url_fragment() -> None:
   targets = [
     DebugTarget(
-      target_id="rb",
+      target_id="betway",
       target_type="page",
-      title="Sure betting",
-      url="https://rb.rebelbetting.com/",
-      websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/rb",
+      title="Betway",
+      url="https://betway.com/gb/en/sports",
+      websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/betway",
     ),
     DebugTarget(
-      target_id="vb",
+      target_id="smarkets",
       target_type="page",
-      title="Value betting",
-      url="https://vb.rebelbetting.com/user",
-      websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/vb",
+      title="Smarkets",
+      url="https://smarkets.com/event/123",
+      websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/smarkets",
     ),
   ]
 
   target = select_debug_target(
-    source="rebelbetting_vb",
+    source="smarkets_exchange",
     targets=targets,
-    url_contains="vb.rebelbetting.com",
+    url_contains="smarkets.com",
   )
 
   assert target == targets[1]

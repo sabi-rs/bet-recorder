@@ -38,10 +38,35 @@ def test_analyze_smarkets_open_positions_extracts_trade_out_rows() -> None:
     assert analysis["positions"][1]["market"] == "Full-time result"
     assert analysis["positions"][1]["can_trade_out"] is True
     assert analysis["account_stats"]["available_balance"] == 120.45
+    assert analysis["account_stats"]["cumulative_pnl"] is None
     assert analysis["account_stats"]["currency"] == "GBP"
     assert len(analysis["other_open_bets"]) == 2
     assert analysis["other_open_bets"][0]["label"] == "Arsenal"
     assert analysis["other_open_bets"][1]["market"] == "Bet Builder"
+
+
+def test_analyze_smarkets_open_positions_extracts_portfolio_cumulative_pnl() -> None:
+    analysis = analyze_smarkets_page(
+        page="open_positions",
+        body_text=(
+            "Portfolio £0.00 Your balance £35.40 Exposure Deposit Withdraw £43.80 "
+            "Profit & Loss £20.40 Potential Winnings "
+            "P&L since Jan 2026 £253.69 Last year: £0.00 Wed "
+            "Tottenham vs Atlético Madrid 1 In 44 Minutes|UEFA Champions League "
+            "Sell Tottenham Full-time result 2.46 £10.00 £14.60 £24.60 £10.08 +£0.08 (0.8%) Order filled Trade out"
+        ),
+        inputs={},
+        visible_actions=["Trade out"],
+    )
+
+    assert analysis["account_stats"] == {
+        "available_balance": 35.40,
+        "exposure": 43.80,
+        "unrealized_pnl": 20.40,
+        "cumulative_pnl": 253.69,
+        "cumulative_pnl_label": "P&L since Jan 2026",
+        "currency": "GBP",
+    }
 
 
 def test_analyze_smarkets_open_positions_extracts_live_trade_out_back_odds_when_present() -> (
@@ -135,6 +160,86 @@ def test_analyze_smarkets_open_positions_enriches_event_url_score_and_implied_pr
     assert round(position["current_implied_probability"], 6) == round(1 / 1.91, 6)
     assert round(position["current_implied_percentage"], 4) == round(
         100 / 1.91, 4
+    )
+
+
+def test_analyze_smarkets_open_positions_extracts_scheduled_event_context_from_live_portfolio() -> (
+    None
+):
+    analysis = analyze_smarkets_page(
+        page="open_positions",
+        body_text=(
+            "Tottenham vs Atlético Madrid\n"
+            "1\n"
+            "In 44 Minutes|UEFA Champions League\n"
+            "-£14.60\n"
+            "Worst Outcome\n"
+            "£10.00\n"
+            "Best Outcome\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Tottenham\n"
+            "Full-time result\n"
+            "2.46\n"
+            "£10.00\n"
+            "£14.60\n"
+            "£24.60\n"
+            "£10.08\n"
+            "+£0.08 (0.8%)\n"
+            "Order filled\n"
+            "Trade out\n"
+            "Brumbies vs Chiefs\n"
+            "1\n"
+            "20 Mar 8:35 AM|Super Rugby\n"
+            "-£20.80\n"
+            "Worst Outcome\n"
+            "£10.40\n"
+            "Best Outcome\n"
+            "Contract\n"
+            "Price\n"
+            "Stake/\n"
+            "Liability\n"
+            "Return\n"
+            "Current Value\n"
+            "Status\n"
+            "Sell Brumbies\n"
+            "Winner (including overtime)\n"
+            "3.00\n"
+            "£10.40\n"
+            "£20.80\n"
+            "£31.20\n"
+            "£7.23\n"
+            "-£3.17 (30.48%)\n"
+            "Order filled\n"
+            "Trade out\n"
+        ),
+        inputs={},
+        visible_actions=["Trade out"],
+        links=[
+            "https://smarkets.com/football/uefa-champions-league/2026/03/18/20-00/tottenham-hotspur-vs-atletico-de-madrid/44941563/",
+            "https://smarkets.com/rugby/super-rugby/2026/03/20/08-35/brumbies-vs-chiefs/44907713/",
+        ],
+    )
+
+    assert analysis["positions"][0]["event"] == "Tottenham vs Atlético Madrid"
+    assert (
+        analysis["positions"][0]["event_status"]
+        == "In 44 Minutes|UEFA Champions League"
+    )
+    assert (
+        analysis["positions"][0]["event_url"]
+        == "https://smarkets.com/football/uefa-champions-league/2026/03/18/20-00/tottenham-hotspur-vs-atletico-de-madrid/44941563/"
+    )
+    assert analysis["positions"][1]["event"] == "Brumbies vs Chiefs"
+    assert analysis["positions"][1]["event_status"] == "20 Mar 8:35 AM|Super Rugby"
+    assert (
+        analysis["positions"][1]["event_url"]
+        == "https://smarkets.com/rugby/super-rugby/2026/03/20/08-35/brumbies-vs-chiefs/44907713/"
     )
 
 

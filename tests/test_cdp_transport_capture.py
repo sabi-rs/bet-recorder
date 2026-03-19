@@ -17,7 +17,7 @@ def test_capture_cdp_transport_selects_target_and_appends_sanitized_events(
   tmp_path: Path,
 ) -> None:
   bundle = initialize_run_bundle(
-    source="rebelbetting_vb",
+    source="smarkets_exchange",
     root_dir=tmp_path,
     started_at=datetime(2026, 3, 9, 10, 15, tzinfo=UTC),
     collector_version="test-v1",
@@ -29,11 +29,11 @@ def test_capture_cdp_transport_selects_target_and_appends_sanitized_events(
     assert debug_base_url == "http://127.0.0.1:9222"
     return [
       DebugTarget(
-        target_id="vb",
+        target_id="smarkets",
         target_type="page",
-        title="Value betting",
-        url="https://vb.rebelbetting.com/user",
-        websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/vb",
+        title="Smarkets",
+        url="https://smarkets.com/event/123",
+        websocket_debugger_url="ws://127.0.0.1:9222/devtools/page/smarkets",
       ),
     ]
 
@@ -42,7 +42,7 @@ def test_capture_cdp_transport_selects_target_and_appends_sanitized_events(
     duration_ms: int,
     reload: bool,
   ) -> list[dict]:
-    assert websocket_debugger_url == "ws://127.0.0.1:9222/devtools/page/vb"
+    assert websocket_debugger_url == "ws://127.0.0.1:9222/devtools/page/smarkets"
     assert duration_ms == 2500
     assert reload is True
     return [
@@ -51,14 +51,14 @@ def test_capture_cdp_transport_selects_target_and_appends_sanitized_events(
         "params": {
           "response": {
             "opcode": 1,
-            "payloadData": '{"access_token":"abc","protocol":"blazorpack"}',
+            "payloadData": '{"access_token":"abc","protocol":"json"}',
           },
         },
       },
     ]
 
   count = capture_cdp_transport(
-    source="rebelbetting_vb",
+    source="smarkets_exchange",
     bundle=bundle,
     debug_base_url="http://127.0.0.1:9222",
     duration_ms=2500,
@@ -86,7 +86,7 @@ def test_capture_cdp_transport_cli_command_uses_live_target_capture(
     [
       "init-run",
       "--source",
-      "rebelbetting_vb",
+      "smarkets_exchange",
       "--root-dir",
       str(tmp_path),
       "--started-at",
@@ -114,7 +114,7 @@ def test_capture_cdp_transport_cli_command_uses_live_target_capture(
     [
       "capture-cdp-transport",
       "--source",
-      "rebelbetting_vb",
+      "smarkets_exchange",
       "--run-dir",
       init_payload["run_dir"],
       "--duration-ms",
@@ -122,20 +122,20 @@ def test_capture_cdp_transport_cli_command_uses_live_target_capture(
       "--debug-base-url",
       "http://127.0.0.1:9222",
       "--url-contains",
-      "vb.rebelbetting.com",
+      "smarkets.com",
       "--reload",
     ],
   )
 
   assert result.exit_code == 0
-  assert captured["source"] == "rebelbetting_vb"
+  assert captured["source"] == "smarkets_exchange"
   assert str(captured["bundle"].run_dir) == init_payload["run_dir"]
   assert captured["duration_ms"] == 2500
   assert captured["debug_base_url"] == "http://127.0.0.1:9222"
-  assert captured["url_contains"] == "vb.rebelbetting.com"
+  assert captured["url_contains"] == "smarkets.com"
   assert captured["reload"] is True
   assert json.loads(result.output) == {
-    "source": "rebelbetting_vb",
+    "source": "smarkets_exchange",
     "transport_path": str(Path(init_payload["run_dir"]) / "transport.jsonl"),
     "captured_event_count": 3,
   }

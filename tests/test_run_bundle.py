@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 import json
 
 from bet_recorder.capture.run_bundle import finalize_run_bundle, initialize_run_bundle
 
 
-def test_initialize_run_bundle_creates_expected_layout(tmp_path: Path) -> None:
+def test_initialize_run_bundle_creates_expected_layout(tmp_path) -> None:
   started_at = datetime(2026, 3, 9, 7, 15, 30, tzinfo=UTC)
 
   bundle = initialize_run_bundle(
-    source="rebelbetting_vb",
+    source="betway_uk",
     root_dir=tmp_path,
     started_at=started_at,
     collector_version="test-v1",
@@ -22,7 +21,7 @@ def test_initialize_run_bundle_creates_expected_layout(tmp_path: Path) -> None:
   assert bundle.run_dir == (
     tmp_path
     / "captures"
-    / "rebelbetting_vb"
+    / "betway_uk"
     / "2026"
     / "2026-03-09"
     / "run-20260309T071530Z"
@@ -39,11 +38,11 @@ def test_initialize_run_bundle_creates_expected_layout(tmp_path: Path) -> None:
   assert bundle.metadata_path.is_file()
 
 
-def test_initialize_run_bundle_writes_run_metadata(tmp_path: Path) -> None:
+def test_initialize_run_bundle_writes_run_metadata(tmp_path) -> None:
   started_at = datetime(2026, 3, 9, 8, 0, 0, tzinfo=UTC)
 
   bundle = initialize_run_bundle(
-    source="fairodds_terminal",
+    source="bet365",
     root_dir=tmp_path,
     started_at=started_at,
     collector_version="test-v2",
@@ -54,7 +53,7 @@ def test_initialize_run_bundle_writes_run_metadata(tmp_path: Path) -> None:
   metadata = json.loads(bundle.metadata_path.read_text())
 
   assert metadata == {
-    "source": "fairodds_terminal",
+    "source": "bet365",
     "started_at": "2026-03-09T08:00:00Z",
     "ended_at": None,
     "collector_version": "test-v2",
@@ -68,11 +67,11 @@ def test_initialize_run_bundle_writes_run_metadata(tmp_path: Path) -> None:
   }
 
 
-def test_initialize_run_bundle_is_idempotent_for_existing_directory(tmp_path: Path) -> None:
+def test_initialize_run_bundle_is_idempotent_for_existing_directory(tmp_path) -> None:
   started_at = datetime(2026, 3, 9, 9, 45, 0, tzinfo=UTC)
 
   first = initialize_run_bundle(
-    source="profitmaximiser_members",
+    source="smarkets_exchange",
     root_dir=tmp_path,
     started_at=started_at,
     collector_version="test-v3",
@@ -83,7 +82,7 @@ def test_initialize_run_bundle_is_idempotent_for_existing_directory(tmp_path: Pa
   first.events_path.write_text('{"kind":"seed"}\n')
 
   second = initialize_run_bundle(
-    source="profitmaximiser_members",
+    source="smarkets_exchange",
     root_dir=tmp_path,
     started_at=started_at,
     collector_version="test-v3",
@@ -95,11 +94,11 @@ def test_initialize_run_bundle_is_idempotent_for_existing_directory(tmp_path: Pa
   assert second.events_path.read_text() == '{"kind":"seed"}\n'
 
 
-def test_finalize_run_bundle_updates_metadata_counts(tmp_path: Path) -> None:
+def test_finalize_run_bundle_updates_metadata_counts(tmp_path) -> None:
   started_at = datetime(2026, 3, 9, 9, 45, 0, tzinfo=UTC)
 
   bundle = initialize_run_bundle(
-    source="rebelbetting_rb",
+    source="smarkets_exchange",
     root_dir=tmp_path,
     started_at=started_at,
     collector_version="test-v4",
@@ -107,9 +106,9 @@ def test_finalize_run_bundle_updates_metadata_counts(tmp_path: Path) -> None:
     transport_capture_enabled=True,
   )
 
-  bundle.events_path.write_text('{"kind":"dashboard_snapshot"}\n{"kind":"reports_snapshot"}\n')
-  (bundle.screenshots_dir / "dashboard.png").write_text("png")
-  (bundle.screenshots_dir / "reports.png").write_text("png")
+  bundle.events_path.write_text('{"kind":"positions_snapshot"}\n{"kind":"watch_plan_snapshot"}\n')
+  (bundle.screenshots_dir / "open-positions.png").write_text("png")
+  (bundle.screenshots_dir / "history.png").write_text("png")
   bundle.transport_path.write_text('{"kind":"ws_frame_received"}\n')
 
   finalize_run_bundle(

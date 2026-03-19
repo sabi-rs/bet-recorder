@@ -14,6 +14,7 @@ from bet_recorder.exchange_worker import (
     handle_worker_request_line,
     load_exchange_snapshot_for_config,
     load_historical_positions,
+    load_ledger_pnl_summary,
 )
 
 
@@ -132,6 +133,110 @@ def test_load_historical_positions_groups_settled_market_pnl_across_matched_entr
     assert rows[0]["pnl_amount"] == 7.81
 
 
+def test_load_historical_positions_keeps_distinct_bets_separate_when_ids_differ(
+    tmp_path: Path,
+) -> None:
+    ledger_history_path = tmp_path / "statement-history.json"
+    ledger_history_path.write_text(
+        json.dumps(
+            {
+                "ledger_entries": [
+                    {
+                        "occurred_at": "2026-03-14T19:29:00Z",
+                        "bet_id": "bet-001",
+                        "group_id": "group-001",
+                        "platform": "bet365",
+                        "activity_type": "bet_settled",
+                        "status": "settled",
+                        "platform_kind": "sportsbook",
+                        "event": "Arsenal vs Everton",
+                        "market": "Full-time result",
+                        "selection": "Arsenal",
+                        "stake_gbp": 8.54,
+                        "odds_decimal": 2.64,
+                        "payout_gbp": 22.55,
+                        "realised_pnl_gbp": 14.01,
+                    },
+                    {
+                        "occurred_at": "2026-03-14T19:29:00Z",
+                        "bet_id": "bet-002",
+                        "group_id": "group-002",
+                        "platform": "betfred",
+                        "activity_type": "bet_settled",
+                        "status": "settled",
+                        "platform_kind": "sportsbook",
+                        "event": "Arsenal vs Everton",
+                        "market": "Full-time result",
+                        "selection": "Draw",
+                        "stake_gbp": 5.0,
+                        "odds_decimal": 3.4,
+                        "payout_gbp": 0.0,
+                        "realised_pnl_gbp": -5.0,
+                    },
+                ]
+            }
+        )
+    )
+
+    rows = load_historical_positions(ledger_history_path)
+
+    assert len(rows) == 2
+    assert [row["contract"] for row in rows] == ["Arsenal", "Draw"]
+
+
+def test_load_ledger_pnl_summary_uses_raw_ledger_totals_and_builds_points(
+    tmp_path: Path,
+) -> None:
+    ledger_history_path = tmp_path / "statement-history.json"
+    ledger_history_path.write_text(
+        json.dumps(
+            {
+                "ledger_entries": [
+                    {
+                        "entry_id": "smarkets:1",
+                        "occurred_at": "2026-03-02T10:00:00",
+                        "platform": "smarkets",
+                        "platform_kind": "exchange",
+                        "activity_type": "market_settled",
+                        "description": "Market Settled",
+                        "realised_pnl_gbp": 10.0,
+                    },
+                    {
+                        "entry_id": "bet10:1",
+                        "occurred_at": "2026-03-02T11:00:00",
+                        "platform": "bet10",
+                        "platform_kind": "sportsbook",
+                        "activity_type": "bet_settled",
+                        "description": "Lost",
+                        "realised_pnl_gbp": -2.0,
+                    },
+                    {
+                        "entry_id": "betfair:bonus",
+                        "occurred_at": "2026-03-02T12:00:00",
+                        "platform": "betfair",
+                        "platform_kind": "sportsbook",
+                        "activity_type": "bet_settled",
+                        "description": "Free Bet Winner",
+                        "realised_pnl_gbp": 4.5,
+                    },
+                ]
+            }
+        )
+    )
+
+    summary = load_ledger_pnl_summary(ledger_history_path)
+
+    assert summary["realised_total"] == 12.5
+    assert summary["exchange_total"] == 10.0
+    assert summary["sportsbook_total"] == 2.5
+    assert summary["promo_total"] == 4.5
+    assert summary["settled_count"] == 3
+    assert summary["standard_count"] == 2
+    assert summary["promo_count"] == 1
+    assert summary["unknown_count"] == 0
+    assert [point["total"] for point in summary["points"]] == [10.0, 8.0, 12.5]
+
+
 def test_exchange_worker_session_loads_latest_positions_snapshot_from_run_dir(
     tmp_path: Path,
 ) -> None:
@@ -228,6 +333,186 @@ def test_exchange_worker_session_loads_latest_positions_snapshot_from_run_dir(
     assert response["snapshot"]["other_open_bets"][1]["label"] == "Both Teams To Score"
     assert response["snapshot"]["watch"]["watch_count"] == 2
     assert response["snapshot"]["runtime"]["source"] == "positions_snapshot"
+
+
+def test_load_exchange_snapshot_backfills_missing_event_context_from_latest_payload(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-18T19:43:15Z",
+                "source": "smarkets_exchange",
+                "kind": "positions_snapshot",
+                "page": "open_positions",
+                "url": "https://smarkets.com/portfolio/?order-state=active",
+                "document_title": "Smarkets Predictions",
+                "body_text": (
+                    "/\n"
+                    "Deposit\n"
+                    "Balance\n"
+                    "£0.00\n"
+                    "TD\n"
+                    "Portfolio\n"
+                    "Tottenham vs Atlético Madrid\n"
+                    "1\n"
+                    "In 44 Minutes|UEFA Champions League\n"
+                    "-£14.60\n"
+                    "Worst Outcome\n"
+                    "£10.00\n"
+                    "Best Outcome\n"
+                    "Contract\n"
+                    "Price\n"
+                    "Stake/\n"
+                    "Liability\n"
+                    "Return\n"
+                    "Current Value\n"
+                    "Status\n"
+                    "Sell Tottenham\n"
+                    "Full-time result\n"
+                    "2.46\n"
+                    "£10.00\n"
+                    "£14.60\n"
+                    "£24.60\n"
+                    "£10.08\n"
+                    "+£0.08 (0.8%)\n"
+                    "Order filled\n"
+                    "Trade out\n"
+                    "Brumbies vs Chiefs\n"
+                    "1\n"
+                    "20 Mar 8:35 AM|Super Rugby\n"
+                    "-£20.80\n"
+                    "Worst Outcome\n"
+                    "£10.40\n"
+                    "Best Outcome\n"
+                    "Contract\n"
+                    "Price\n"
+                    "Stake/\n"
+                    "Liability\n"
+                    "Return\n"
+                    "Current Value\n"
+                    "Status\n"
+                    "Sell Brumbies\n"
+                    "Winner (including overtime)\n"
+                    "3.00\n"
+                    "£10.40\n"
+                    "£20.80\n"
+                    "£31.20\n"
+                    "£7.23\n"
+                    "-£3.17 (30.48%)\n"
+                    "Order filled\n"
+                    "Trade out"
+                ),
+                "interactive_snapshot": [],
+                "links": [
+                    "https://smarkets.com/football/uefa-champions-league/2026/03/18/20-00/tottenham-hotspur-vs-atletico-de-madrid/44941563/",
+                    "https://smarkets.com/rugby/super-rugby/2026/03/20/08-35/brumbies-vs-chiefs/44907713/",
+                ],
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+                "resource_hosts": ["smarkets.com"],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": [],
+            },
+        )
+        + "\n",
+    )
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "source": "smarkets_exchange",
+                "run_dir": str(run_dir),
+                "updated_at": "2026-03-18T19:43:20Z",
+                "interval_seconds": 5,
+                "iteration": 42,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "Watcher iteration captured 2 watch groups from 2 positions.",
+                },
+                "account_stats": None,
+                "open_positions": [
+                    {
+                        "event": "",
+                        "event_status": "",
+                        "event_url": "",
+                        "contract": "Tottenham",
+                        "market": "Full-time result",
+                        "status": "filled",
+                        "market_status": "tradable",
+                        "is_in_play": False,
+                        "price": 2.46,
+                        "stake": 10.0,
+                        "liability": 14.6,
+                        "current_value": 10.08,
+                        "pnl_amount": 0.08,
+                        "live_clock": "",
+                        "can_trade_out": True,
+                    },
+                    {
+                        "event": "",
+                        "event_status": "",
+                        "event_url": "",
+                        "contract": "Brumbies",
+                        "market": "Winner (including overtime)",
+                        "status": "filled",
+                        "market_status": "tradable",
+                        "is_in_play": False,
+                        "price": 3.0,
+                        "stake": 10.4,
+                        "liability": 20.8,
+                        "current_value": 7.23,
+                        "pnl_amount": -3.17,
+                        "live_clock": "",
+                        "can_trade_out": True,
+                    },
+                ],
+                "other_open_bets": [],
+                "watch": {
+                    "position_count": 2,
+                    "watch_count": 2,
+                    "commission_rate": 0.0,
+                    "target_profit": 1.0,
+                    "stop_loss": 1.0,
+                    "watches": [],
+                },
+                "decision_count": 0,
+                "decisions": [],
+            }
+        )
+        + "\n",
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            agent_browser_session=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+        ),
+        capture_live=False,
+    )
+
+    assert snapshot["open_positions"][0]["event"] == "Tottenham vs Atlético Madrid"
+    assert (
+        snapshot["open_positions"][0]["event_status"]
+        == "In 44 Minutes|UEFA Champions League"
+    )
+    assert (
+        snapshot["open_positions"][0]["event_url"]
+        == "https://smarkets.com/football/uefa-champions-league/2026/03/18/20-00/tottenham-hotspur-vs-atletico-de-madrid/44941563/"
+    )
+    assert snapshot["open_positions"][1]["event_status"] == "20 Mar 8:35 AM|Super Rugby"
 
 
 def test_exchange_worker_session_keeps_running_after_request_error(

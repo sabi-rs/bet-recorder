@@ -7,16 +7,6 @@ from bet_recorder.capture.page_snapshot import PageSnapshot, append_page_snapsho
 from bet_recorder.capture.run_bundle import RunBundle
 from bet_recorder.capture.watch_snapshot import WatchSnapshot, append_watch_snapshot
 from bet_recorder.sources.betway_uk import BetwayPageCapture, capture_betway_page
-from bet_recorder.sources.fairodds_terminal import (
-  FairOddsPageCapture,
-  capture_fairodds_page,
-)
-from bet_recorder.sources.profitmaximiser import (
-  ProfitMaximiserPageCapture,
-  capture_profitmaximiser_page,
-)
-from bet_recorder.sources.rebelbetting_rb import RbPageCapture, capture_rb_page
-from bet_recorder.sources.rebelbetting_vb import VbPageCapture, capture_vb_page
 from bet_recorder.sources.smarkets_exchange import (
   SmarketsExchangePageCapture,
   capture_smarkets_exchange_page,
@@ -27,27 +17,7 @@ from bet_recorder.transport.writer import append_transport_event
 def record_live_page(*, source: str, bundle: RunBundle, payload: dict) -> None:
   captured_at = datetime.fromisoformat(payload["captured_at"].replace("Z", "+00:00"))
 
-  if source == "rebelbetting_vb":
-    capture_vb_page(
-      bundle,
-      VbPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
-    )
-  elif source == "rebelbetting_rb":
-    capture_rb_page(
-      bundle,
-      RbPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
-    )
-  elif source == "fairodds_terminal":
-    capture_fairodds_page(
-      bundle,
-      FairOddsPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
-    )
-  elif source == "profitmaximiser_members":
-    capture_profitmaximiser_page(
-      bundle,
-      ProfitMaximiserPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
-    )
-  elif source == "betway_uk":
+  if source == "betway_uk":
     capture_betway_page(
       bundle,
       BetwayPageCapture(captured_at=captured_at, **_common_payload_kwargs(payload)),
@@ -146,4 +116,8 @@ def _generic_page_kind(page: str) -> str:
     return "settlement_snapshot"
   if page == "market":
     return "market_snapshot"
+  if page == "betslip":
+    return "betslip_snapshot"
+  if page == "confirmation":
+    return "confirmation_snapshot"
   raise ValueError(f"Unsupported generic page kind: {page}")

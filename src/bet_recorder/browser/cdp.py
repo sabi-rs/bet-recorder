@@ -11,10 +11,12 @@ JsonFetcher = Callable[[str], str]
 
 DEFAULT_DEBUG_BASE_URL = "http://127.0.0.1:9222"
 SOURCE_URL_FRAGMENTS = {
-  "rebelbetting_vb": "vb.rebelbetting.com",
-  "rebelbetting_rb": "rb.rebelbetting.com",
-  "fairodds_terminal": "app.fairoddsterminal.com",
-  "profitmaximiser_members": "profitmaximiser.co.uk/members",
+  "bet365": "bet365.com",
+  "betuk": "betuk.com",
+  "betfred": "betfred.com",
+  "betdaq": "betdaq.com",
+  "betway_uk": "betway",
+  "smarkets_exchange": "smarkets.com",
 }
 PAGE_STATE_JS = r"""
 (() => {

@@ -9,20 +9,18 @@ from typer.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bet_recorder.browser.adapter import build_page_payload  # noqa: E402
-from bet_recorder.cli import app  # noqa: E402
 from bet_recorder.capture.run_bundle import initialize_run_bundle  # noqa: E402
+from bet_recorder.cli import app  # noqa: E402
 from bet_recorder.live.runner import (  # noqa: E402
   record_live_page,
   record_live_transport,
   record_watch_plan,
 )
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
-
 
 def test_record_live_page_appends_source_specific_event(tmp_path: Path) -> None:
   bundle = initialize_run_bundle(
-    source="rebelbetting_vb",
+    source="betway_uk",
     root_dir=tmp_path,
     started_at=datetime(2026, 3, 9, 10, 15, tzinfo=UTC),
     collector_version="test-v1",
@@ -31,34 +29,34 @@ def test_record_live_page_appends_source_specific_event(tmp_path: Path) -> None:
   )
 
   record_live_page(
-    source="rebelbetting_vb",
+    source="betway_uk",
     bundle=bundle,
     payload=build_page_payload(
       captured_at=datetime(2026, 3, 9, 10, 16, tzinfo=UTC),
-      page="dashboard",
-      url="https://vb.rebelbetting.com/",
-      document_title="Value betting by RebelBetting",
-      body_text="25 value bets",
-      interactive_snapshot=[{"tag": "A", "text": "Filters"}],
-      links=["https://vb.rebelbetting.com/filters"],
-      inputs={"search": ""},
-      visible_actions=["Filters"],
-      resource_hosts=["vb.rebelbetting.com"],
-      local_storage_keys=["Token"],
-      notes=["trial-mode"],
+      page="market",
+      url="https://betway.com/gb/en/sports/event/16431700?marketGroup=SGP",
+      document_title="Betway event",
+      body_text="Almeria Correct Score",
+      interactive_snapshot=[{"tag": "BUTTON", "text": "Add to Bet Slip"}],
+      links=["https://betway.com/gb/en/sports"],
+      inputs={"stake": ""},
+      visible_actions=["Add to Bet Slip"],
+      resource_hosts=["betway.com"],
+      local_storage_keys=["theme"],
+      notes=["free-bet"],
     ),
   )
 
   event = json.loads(bundle.events_path.read_text())
 
-  assert event["source"] == "rebelbetting_vb"
-  assert event["kind"] == "dashboard_snapshot"
-  assert event["page"] == "dashboard"
+  assert event["source"] == "betway_uk"
+  assert event["kind"] == "market_snapshot"
+  assert event["page"] == "market"
 
 
 def test_record_live_transport_appends_sanitized_event(tmp_path: Path) -> None:
   bundle = initialize_run_bundle(
-    source="rebelbetting_vb",
+    source="smarkets_exchange",
     root_dir=tmp_path,
     started_at=datetime(2026, 3, 9, 10, 15, tzinfo=UTC),
     collector_version="test-v1",
@@ -122,41 +120,6 @@ def test_record_watch_plan_appends_watch_plan_event(tmp_path: Path) -> None:
   assert event["watch_count"] == 2
 
 
-def test_record_live_page_accepts_betway_page_payload(tmp_path: Path) -> None:
-  bundle = initialize_run_bundle(
-    source="betway_uk",
-    root_dir=tmp_path,
-    started_at=datetime(2026, 3, 9, 20, 15, tzinfo=UTC),
-    collector_version="test-v1",
-    browser_profile_used="helium-copy",
-    transport_capture_enabled=False,
-  )
-
-  record_live_page(
-    source="betway_uk",
-    bundle=bundle,
-    payload=build_page_payload(
-      captured_at=datetime(2026, 3, 9, 20, 16, tzinfo=UTC),
-      page="confirmation",
-      url="https://betway.com/gb/en/sports/event/16431700?marketGroup=SGP",
-      document_title="Betway confirmation",
-      body_text="Bet placed",
-      interactive_snapshot=[],
-      links=[],
-      inputs={"stake": "10"},
-      visible_actions=["Done"],
-      resource_hosts=["betway.com"],
-      local_storage_keys=["theme"],
-      notes=["free-bet"],
-    ),
-  )
-
-  event = json.loads(bundle.events_path.read_text())
-
-  assert event["source"] == "betway_uk"
-  assert event["kind"] == "confirmation_snapshot"
-
-
 def test_capture_live_page_cli_command_uses_fixture_payload(tmp_path: Path) -> None:
   runner = CliRunner()
 
@@ -165,7 +128,7 @@ def test_capture_live_page_cli_command_uses_fixture_payload(tmp_path: Path) -> N
     [
       "init-run",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--root-dir",
       str(tmp_path),
       "--started-at",
@@ -184,17 +147,17 @@ def test_capture_live_page_cli_command_uses_fixture_payload(tmp_path: Path) -> N
     json.dumps(
       build_page_payload(
         captured_at=datetime(2026, 3, 9, 10, 16, tzinfo=UTC),
-        page="dashboard",
-        url="https://vb.rebelbetting.com/",
-        document_title="Value betting by RebelBetting",
-        body_text="25 value bets",
-        interactive_snapshot=[{"tag": "A", "text": "Filters"}],
-        links=["https://vb.rebelbetting.com/filters"],
-        inputs={"search": ""},
-        visible_actions=["Filters"],
-        resource_hosts=["vb.rebelbetting.com"],
-        local_storage_keys=["Token"],
-        notes=["trial-mode"],
+        page="confirmation",
+        url="https://betway.com/gb/en/sports/event/16431700?marketGroup=SGP",
+        document_title="Betway confirmation",
+        body_text="Bet placed",
+        interactive_snapshot=[{"tag": "BUTTON", "text": "Done"}],
+        links=["https://betway.com/gb/en/sports"],
+        inputs={"stake": "10"},
+        visible_actions=["Done"],
+        resource_hosts=["betway.com"],
+        local_storage_keys=["theme"],
+        notes=["free-bet"],
       ),
     ),
   )
@@ -204,7 +167,7 @@ def test_capture_live_page_cli_command_uses_fixture_payload(tmp_path: Path) -> N
     [
       "capture-live-page",
       "--source",
-      "rebelbetting_vb",
+      "betway_uk",
       "--run-dir",
       init_payload["run_dir"],
       "--payload-path",
@@ -215,22 +178,22 @@ def test_capture_live_page_cli_command_uses_fixture_payload(tmp_path: Path) -> N
   assert result.exit_code == 0
 
   event = json.loads(Path(init_payload["events_path"]).read_text())
-  assert event["kind"] == "dashboard_snapshot"
+  assert event["kind"] == "confirmation_snapshot"
 
 
 @pytest.mark.parametrize(
-  ("source", "fixture_name", "expected_kind"),
+  ("source", "page", "expected_kind"),
   [
-    ("rebelbetting_vb", "rebelbetting_vb_live.json", "dashboard_snapshot"),
-    ("rebelbetting_rb", "rebelbetting_rb_live.json", "filters_snapshot"),
-    ("fairodds_terminal", "fairodds_live.json", "ui_state_snapshot"),
-    ("profitmaximiser_members", "profitmaximiser_live.json", "offer_table_snapshot"),
+    ("bet365", "my_bets", "positions_snapshot"),
+    ("betuk", "market", "market_snapshot"),
+    ("betfred", "my_bets", "positions_snapshot"),
+    ("betdaq", "open_positions", "positions_snapshot"),
   ],
 )
-def test_record_live_page_accepts_source_fixtures(
+def test_record_live_page_accepts_generic_current_sources(
   tmp_path: Path,
   source: str,
-  fixture_name: str,
+  page: str,
   expected_kind: str,
 ) -> None:
   bundle = initialize_run_bundle(
@@ -239,10 +202,23 @@ def test_record_live_page_accepts_source_fixtures(
     started_at=datetime(2026, 3, 9, 10, 15, tzinfo=UTC),
     collector_version="test-v1",
     browser_profile_used="helium-copy",
-    transport_capture_enabled=source.startswith("rebelbetting_"),
+    transport_capture_enabled=False,
   )
 
-  payload = json.loads((FIXTURES_DIR / fixture_name).read_text())
+  payload = build_page_payload(
+    captured_at=datetime(2026, 3, 9, 10, 16, tzinfo=UTC),
+    page=page,
+    url=f"https://{source}.example.test/{page}",
+    document_title=f"{source} {page}",
+    body_text="Example page",
+    interactive_snapshot=[],
+    links=[],
+    inputs={},
+    visible_actions=[],
+    resource_hosts=[f"{source}.example.test"],
+    local_storage_keys=["session"],
+    notes=["fixture"],
+  )
 
   record_live_page(source=source, bundle=bundle, payload=payload)
 

@@ -1071,6 +1071,38 @@ def _find_live_venue_targets(
     return matched
 
 
+def _target_looks_like_horse_market_candidate(*, target, query: dict) -> bool:
+    lowered_haystack = f"{target.title} {target.url}".lower()
+    search_terms = [
+        str(term).strip().lower()
+        for term in query.get("search", [])
+        if str(term).strip()
+    ]
+    if search_terms and any(term in lowered_haystack for term in search_terms):
+        return True
+    return any(
+        marker in lowered_haystack
+        for marker in (
+            "/horse-racing/",
+            "horse-racing",
+            "horse racing",
+            "racing",
+            "racecard",
+            "runner",
+            "each-way",
+        )
+    )
+
+
+def _prioritize_horse_market_targets(*, targets: list, query: dict) -> list:
+    prioritized = [
+        target
+        for target in targets
+        if _target_looks_like_horse_market_candidate(target=target, query=query)
+    ]
+    return prioritized or targets
+
+
 def _matches_horse_search_terms(*, query: dict, event_name: str, selection_names: list[str]) -> bool:
     terms = [
         str(term).strip().lower()
@@ -1134,52 +1166,70 @@ def capture_live_horse_market_snapshot(query: dict) -> dict:
             )
             continue
 
-        for target in venue_targets:
-            payload = capture_debug_target_page_state(
-                websocket_debugger_url=target.websocket_debugger_url,
-                page="market",
-                captured_at=datetime.now(UTC),
-                notes=[f"horse-matcher:{venue}"],
-            )
-            analysis = analyze_racing_market_page(
-                venue=venue,
-                page=payload["page"],
-                url=str(payload.get("url", "")),
-                document_title=str(payload.get("document_title", "")),
-                body_text=str(payload.get("body_text", "")),
-                interactive_snapshot=list(payload.get("interactive_snapshot", [])),
-            )
-            selection_names = [
-                str(quote.get("selection_name", ""))
-                for quote in analysis.get("quotes", [])
-                if str(quote.get("selection_name", ""))
-            ]
-            status = str(analysis.get("status", "ignored"))
-            detail = str(analysis.get("detail", ""))
-            if status == "ready" and not _matches_horse_search_terms(
-                query=query,
-                event_name=str(analysis.get("event_name", "")),
-                selection_names=selection_names,
-            ):
-                status = "ignored"
-                detail = "Market captured but filtered out by search terms."
+        for target in _prioritize_horse_market_targets(targets=venue_targets, query=query):
+            try:
+                payload = capture_debug_target_page_state(
+                    websocket_debugger_url=target.websocket_debugger_url,
+                    page="market",
+                    captured_at=datetime.now(UTC),
+                    notes=[f"horse-matcher:{venue}"],
+                )
+                analysis = analyze_racing_market_page(
+                    venue=venue,
+                    page=payload["page"],
+                    url=str(payload.get("url", "")),
+                    document_title=str(payload.get("document_title", "")),
+                    body_text=str(payload.get("body_text", "")),
+                    interactive_snapshot=list(payload.get("interactive_snapshot", [])),
+                )
+                selection_names = [
+                    str(quote.get("selection_name", ""))
+                    for quote in analysis.get("quotes", [])
+                    if str(quote.get("selection_name", ""))
+                ]
+                status = str(analysis.get("status", "ignored"))
+                detail = str(analysis.get("detail", ""))
+                if status == "ready" and not _matches_horse_search_terms(
+                    query=query,
+                    event_name=str(analysis.get("event_name", "")),
+                    selection_names=selection_names,
+                ):
+                    status = "ignored"
+                    detail = "Market captured but filtered out by search terms."
 
-            sources.append(
-                {
-                    "venue": venue,
-                    "venue_label": definition.label,
-                    "kind": "exchange" if venue in {"smarkets", "betdaq"} else "sportsbook",
-                    "status": status,
-                    "detail": detail,
-                    "page_url": str(payload.get("url", "")),
-                    "page_title": str(payload.get("document_title", "")),
-                    "event_name": str(analysis.get("event_name", "")),
-                    "market_name": str(analysis.get("market_name", "")),
-                    "start_hint": str(analysis.get("start_hint", "")),
-                    "captured_at": str(payload.get("captured_at", captured_at)),
-                    "quotes": list(analysis.get("quotes", [])),
-                }
-            )
+                sources.append(
+                    {
+                        "venue": venue,
+                        "venue_label": definition.label,
+                        "kind": "exchange" if venue in {"smarkets", "betdaq"} else "sportsbook",
+                        "status": status,
+                        "detail": detail,
+                        "page_url": str(payload.get("url", "")),
+                        "page_title": str(payload.get("document_title", "")),
+                        "event_name": str(analysis.get("event_name", "")),
+                        "market_name": str(analysis.get("market_name", "")),
+                        "start_hint": str(analysis.get("start_hint", "")),
+                        "captured_at": str(payload.get("captured_at", captured_at)),
+                        "quotes": list(analysis.get("quotes", [])),
+                    }
+                )
+            except Exception as exc:
+                sources.append(
+                    {
+                        "venue": venue,
+                        "venue_label": definition.label,
+                        "kind": "exchange" if venue in {"smarkets", "betdaq"} else "sportsbook",
+                        "status": "error",
+                        "detail": f"Failed to inspect live horse market target: {exc}",
+                        "page_url": str(target.url),
+                        "page_title": str(target.title),
+                        "event_name": "",
+                        "market_name": "",
+                        "start_hint": "",
+                        "captured_at": captured_at,
+                        "quotes": [],
+                    }
+                )
 
     ready_count = sum(1 for source in sources if source["status"] == "ready")
     return {

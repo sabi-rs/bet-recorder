@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bet_recorder.browser.cdp import DebugTarget
 from bet_recorder.cli import app
+from bet_recorder import exchange_worker as exchange_worker_module
 from bet_recorder.exchange_worker import (
     WorkerConfig,
     handle_worker_request,
@@ -81,6 +82,99 @@ def test_exchange_worker_session_handles_multiple_ndjson_requests(
     )
     assert responses[1]["snapshot"]["watch"]["watch_count"] == 2
     assert responses[2]["snapshot"]["watch"]["watch_count"] == 2
+
+
+def test_capture_live_horse_market_snapshot_prefers_relevant_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [
+        DebugTarget(
+            target_id="football",
+            target_type="page",
+            title="Smarkets Predictions",
+            url="https://smarkets.com/football/premier-league",
+            websocket_debugger_url="ws://football",
+        ),
+        DebugTarget(
+            target_id="horse",
+            target_type="page",
+            title="Smarkets Predictions",
+            url="https://smarkets.com/horse-racing/newbury/2026/03/20/15-32/44958026/",
+            websocket_debugger_url="ws://horse",
+        ),
+    ]
+    seen_targets: list[str] = []
+
+    monkeypatch.setattr(exchange_worker_module, "list_debug_targets", lambda: targets)
+
+    def fake_capture_debug_target_page_state(**kwargs):
+        seen_targets.append(kwargs["websocket_debugger_url"])
+        return {
+            "page": "market",
+            "url": "https://smarkets.com/horse-racing/newbury/2026/03/20/15-32/44958026/",
+            "document_title": "15:32 Newbury - Win Market",
+            "body_text": "15:32 Newbury Winner Desert Hero 5.2 King Of Steel 6.0",
+            "interactive_snapshot": [],
+            "captured_at": "2026-03-20T12:00:00Z",
+        }
+
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_debug_target_page_state",
+        fake_capture_debug_target_page_state,
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "analyze_racing_market_page",
+        lambda **_: {
+            "status": "ready",
+            "detail": "Captured 2 smarkets racing quote(s).",
+            "event_name": "15:32 Newbury",
+            "market_name": "Win",
+            "start_hint": "15:32",
+            "quotes": [
+                {"selection_name": "Desert Hero", "side": "lay", "odds": 5.4},
+                {"selection_name": "King Of Steel", "side": "lay", "odds": 6.0},
+            ],
+        },
+    )
+
+    snapshot = exchange_worker_module.capture_live_horse_market_snapshot(
+        {"bookmakers": [], "exchanges": ["smarkets"], "search": []}
+    )
+
+    assert seen_targets == ["ws://horse"]
+    assert snapshot["ready_source_count"] == 1
+    assert snapshot["sources"][0]["status"] == "ready"
+
+
+def test_capture_live_horse_market_snapshot_records_target_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [
+        DebugTarget(
+            target_id="horse",
+            target_type="page",
+            title="Smarkets Predictions",
+            url="https://smarkets.com/horse-racing/newbury/2026/03/20/15-32/44958026/",
+            websocket_debugger_url="ws://horse",
+        )
+    ]
+
+    monkeypatch.setattr(exchange_worker_module, "list_debug_targets", lambda: targets)
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_debug_target_page_state",
+        lambda **_: (_ for _ in ()).throw(ValueError("CDP evaluation timed out after 5s")),
+    )
+
+    snapshot = exchange_worker_module.capture_live_horse_market_snapshot(
+        {"bookmakers": [], "exchanges": ["smarkets"], "search": []}
+    )
+
+    assert snapshot["ready_source_count"] == 0
+    assert snapshot["sources"][0]["status"] == "error"
+    assert "timed out" in snapshot["sources"][0]["detail"]
 
 
 def test_exchange_worker_session_attaches_recorder_bundle_evidence(

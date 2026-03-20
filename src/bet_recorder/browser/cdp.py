@@ -10,6 +10,7 @@ from urllib.request import urlopen
 JsonFetcher = Callable[[str], str]
 
 DEFAULT_DEBUG_BASE_URL = "http://127.0.0.1:9222"
+DEFAULT_EVALUATE_TIMEOUT_SECONDS = 5.0
 SOURCE_URL_FRAGMENTS = {
   "bet365": "bet365.com",
   "betuk": "betuk.com",
@@ -286,7 +287,15 @@ async def _evaluate_debug_target_value(
       ),
     )
     while True:
-      raw_message = await websocket.recv()
+      try:
+        raw_message = await asyncio.wait_for(
+          websocket.recv(),
+          timeout=DEFAULT_EVALUATE_TIMEOUT_SECONDS,
+        )
+      except TimeoutError as exc:
+        raise ValueError(
+          f"CDP evaluation timed out after {DEFAULT_EVALUATE_TIMEOUT_SECONDS:.0f}s"
+        ) from exc
       payload = json.loads(raw_message)
       if payload.get("id") != 1:
         continue

@@ -41,6 +41,8 @@ HISTORICAL_POSITION_ACTIVITY_TYPES = {
     "cash_out",
 }
 DEFAULT_SELECTED_VENUE = "smarkets"
+RECORDER_EVENT_HISTORY_LIMIT = 8
+TRANSPORT_MARKER_HISTORY_LIMIT = 8
 LIVE_VENUE_ORDER = (
     "bet365",
     "betdaq",
@@ -291,6 +293,211 @@ def load_latest_positions_payload_from_run_dir(run_dir: Path) -> dict:
     if latest_payload is None:
         raise ValueError(f"No positions_snapshot event found in run bundle: {run_dir}")
     return latest_payload
+
+
+def load_run_bundle_events(run_dir: Path | None) -> list[dict]:
+    if run_dir is None:
+        return []
+
+    events_path = run_dir / "events.jsonl"
+    if not events_path.exists():
+        return []
+
+    events: list[dict] = []
+    for line in events_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def load_transport_capture_events(run_dir: Path | None) -> list[dict]:
+    if run_dir is None:
+        return []
+
+    transport_path = run_dir / "transport.jsonl"
+    if not transport_path.exists():
+        return []
+
+    events: list[dict] = []
+    for line in transport_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def build_recorder_bundle_summary(run_dir: Path | None) -> dict | None:
+    if run_dir is None:
+        return None
+
+    events = load_run_bundle_events(run_dir)
+    latest_event = events[-1] if events else {}
+    latest_positions_event = next(
+        (event for event in reversed(events) if event.get("kind") == "positions_snapshot"),
+        {},
+    )
+    latest_watch_plan_event = next(
+        (event for event in reversed(events) if event.get("kind") == "watch_plan_snapshot"),
+        {},
+    )
+    return {
+        "run_dir": str(run_dir),
+        "event_count": len(events),
+        "latest_event_at": _event_timestamp(latest_event),
+        "latest_event_kind": str(latest_event.get("kind", "") or ""),
+        "latest_event_summary": _event_summary(latest_event),
+        "latest_positions_at": _event_timestamp(latest_positions_event),
+        "latest_watch_plan_at": _event_timestamp(latest_watch_plan_event),
+    }
+
+
+def load_recent_recorder_events(
+    run_dir: Path | None,
+    *,
+    limit: int = RECORDER_EVENT_HISTORY_LIMIT,
+) -> list[dict]:
+    events = load_run_bundle_events(run_dir)
+    if limit <= 0:
+        return []
+    return [_normalize_recorder_event(event) for event in events[-limit:]][::-1]
+
+
+def build_transport_marker_summary(run_dir: Path | None) -> dict | None:
+    if run_dir is None:
+        return None
+
+    markers = [
+        event
+        for event in load_transport_capture_events(run_dir)
+        if event.get("kind") == "interaction_marker"
+    ]
+    latest_marker = markers[-1] if markers else {}
+    return {
+        "transport_path": str(run_dir / "transport.jsonl"),
+        "marker_count": len(markers),
+        "latest_marker_at": _event_timestamp(latest_marker),
+        "latest_marker_action": str(latest_marker.get("action", "") or ""),
+        "latest_marker_phase": str(latest_marker.get("phase", "") or ""),
+        "latest_marker_summary": _transport_marker_summary(latest_marker),
+    }
+
+
+def load_recent_transport_markers(
+    run_dir: Path | None,
+    *,
+    limit: int = TRANSPORT_MARKER_HISTORY_LIMIT,
+) -> list[dict]:
+    markers = [
+        event
+        for event in load_transport_capture_events(run_dir)
+        if event.get("kind") == "interaction_marker"
+    ]
+    if limit <= 0:
+        return []
+    return [_normalize_transport_marker(event) for event in markers[-limit:]][::-1]
+
+
+def _normalize_recorder_event(event: dict) -> dict:
+    return {
+        "captured_at": _event_timestamp(event),
+        "kind": str(event.get("kind", "") or ""),
+        "source": str(event.get("source", "") or ""),
+        "page": str(event.get("page", "") or ""),
+        "action": str(event.get("action", "") or ""),
+        "status": str(event.get("status", "") or ""),
+        "request_id": str(event.get("request_id", "") or ""),
+        "reference_id": str(event.get("reference_id", "") or ""),
+        "summary": _event_summary(event),
+        "detail": _event_detail(event),
+    }
+
+
+def _normalize_transport_marker(event: dict) -> dict:
+    return {
+        "captured_at": _event_timestamp(event),
+        "kind": str(event.get("kind", "") or ""),
+        "action": str(event.get("action", "") or ""),
+        "phase": str(event.get("phase", "") or ""),
+        "request_id": str(event.get("request_id", "") or ""),
+        "reference_id": str(event.get("reference_id", "") or ""),
+        "summary": _transport_marker_summary(event),
+        "detail": str(event.get("detail", "") or ""),
+    }
+
+
+def _event_timestamp(event: dict) -> str:
+    return str(event.get("captured_at", "") or event.get("occurred_at", "") or "")
+
+
+def _event_summary(event: dict) -> str:
+    kind = str(event.get("kind", "") or "")
+    source = _humanize_event_field(event.get("source"), fallback="recorder")
+    page = _humanize_event_field(event.get("page"), fallback="capture")
+
+    if kind == "watch_plan_snapshot":
+        watch_count = int(event.get("watch_count", 0) or 0)
+        position_count = int(event.get("position_count", 0) or 0)
+        return (
+            f"Watch plan refreshed with {watch_count} row(s) across "
+            f"{position_count} position(s)."
+        )
+    if kind == "action_snapshot":
+        action = str(event.get("action", "") or "action")
+        status = str(event.get("status", "") or "unknown")
+        target = str(event.get("target", "") or "").strip()
+        if target:
+            return f"{action} {target} -> {status}"
+        return f"Action {action} -> {status}"
+    if kind == "operator_interaction":
+        action = str(event.get("action", "") or "interaction")
+        status = str(event.get("status", "") or "unknown")
+        reference_id = str(event.get("reference_id", "") or "").strip()
+        if reference_id:
+            return f"{action} {reference_id} -> {status}"
+        return f"{action} -> {status}"
+    if kind:
+        return f"Captured {source} {page} ({kind})."
+    return "Recorded bundle event."
+
+
+def _event_detail(event: dict) -> str:
+    for field in ("detail", "document_title", "url", "target", "status"):
+        value = str(event.get(field, "") or "").strip()
+        if value:
+            return value
+    notes = event.get("notes")
+    if isinstance(notes, list):
+        joined = ", ".join(str(note).strip() for note in notes if str(note).strip())
+        if joined:
+            return joined
+    return ""
+
+
+def _humanize_event_field(value, *, fallback: str) -> str:
+    text = str(value or "").strip().replace("_", " ")
+    return text or fallback
+
+
+def _transport_marker_summary(event: dict) -> str:
+    action = str(event.get("action", "") or "interaction")
+    phase = str(event.get("phase", "") or "event")
+    request_id = str(event.get("request_id", "") or "").strip()
+    reference_id = str(event.get("reference_id", "") or "").strip()
+    identifiers = " ".join(value for value in (request_id, reference_id) if value).strip()
+    if identifiers:
+        return f"{phase} {action} {identifiers}".strip()
+    return f"{phase} {action}".strip()
 
 
 def load_positions_analysis_for_config(config: WorkerConfig) -> dict:
@@ -1981,6 +2188,28 @@ def annotate_snapshot_refresh_kind(snapshot: dict, refresh_kind: str) -> dict:
     return snapshot
 
 
+def attach_snapshot_bundle_evidence(snapshot: dict, run_dir: Path | None) -> dict:
+    snapshot["recorder_bundle"] = build_recorder_bundle_summary(run_dir)
+    snapshot["recorder_events"] = load_recent_recorder_events(run_dir)
+    snapshot["transport_summary"] = build_transport_marker_summary(run_dir)
+    snapshot["transport_events"] = load_recent_transport_markers(run_dir)
+    return snapshot
+
+
+def build_worker_snapshot_response(
+    snapshot: dict,
+    *,
+    refresh_kind: str,
+    run_dir: Path | None,
+) -> dict:
+    return {
+        "snapshot": attach_snapshot_bundle_evidence(
+            annotate_snapshot_refresh_kind(snapshot, refresh_kind),
+            run_dir,
+        )
+    }
+
+
 def handle_worker_request(
     *,
     request: str | dict,
@@ -2011,9 +2240,11 @@ def handle_worker_request(
                 )
             else:
                 raise
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(snapshot, "bootstrap")
-        }
+        response = build_worker_snapshot_response(
+            snapshot,
+            refresh_kind="bootstrap",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue
@@ -2021,33 +2252,31 @@ def handle_worker_request(
     resolved_config = require_worker_config(config, request_name)
 
     if request_name in {"Refresh", "RefreshLive"}:
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(
-                load_exchange_snapshot_for_config(
-                    resolved_config,
-                    selected_venue=effective_selected_venue,
-                    capture_live=True,
-                    cached_snapshot=cached_snapshot,
-                ),
-                "live_capture",
-            )
-        }
+        response = build_worker_snapshot_response(
+            load_exchange_snapshot_for_config(
+                resolved_config,
+                selected_venue=effective_selected_venue,
+                capture_live=True,
+                cached_snapshot=cached_snapshot,
+            ),
+            refresh_kind="live_capture",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue
 
     if request_name == "RefreshCached":
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(
-                load_exchange_snapshot_for_config(
-                    resolved_config,
-                    selected_venue=effective_selected_venue,
-                    capture_live=False,
-                    cached_snapshot=cached_snapshot,
-                ),
-                "cached",
-            )
-        }
+        response = build_worker_snapshot_response(
+            load_exchange_snapshot_for_config(
+                resolved_config,
+                selected_venue=effective_selected_venue,
+                capture_live=False,
+                cached_snapshot=cached_snapshot,
+            ),
+            refresh_kind="cached",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue
@@ -2060,17 +2289,16 @@ def handle_worker_request(
             raise ValueError("SelectVenue payload must include venue.") from exc
         if venue not in {"smarkets", *LIVE_VENUE_DEFINITIONS.keys()}:
             raise ValueError(f"Unsupported venue for recorder worker: {venue}")
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(
-                load_exchange_snapshot_for_config(
-                    resolved_config,
-                    selected_venue=venue,
-                    capture_live=(venue != "smarkets"),
-                    cached_snapshot=cached_snapshot,
-                ),
-                "live_capture" if venue != "smarkets" else "cached",
-            )
-        }
+        response = build_worker_snapshot_response(
+            load_exchange_snapshot_for_config(
+                resolved_config,
+                selected_venue=venue,
+                capture_live=(venue != "smarkets"),
+                cached_snapshot=cached_snapshot,
+            ),
+            refresh_kind="live_capture" if venue != "smarkets" else "cached",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, venue
@@ -2087,12 +2315,15 @@ def handle_worker_request(
             capture_live=False,
             cached_snapshot=cached_snapshot,
         )
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(
-                handle_cash_out_tracked_bet(snapshot=snapshot, bet_id=bet_id),
-                "cached",
-            )
-        }
+        response = build_worker_snapshot_response(
+            handle_cash_out_tracked_bet(
+                snapshot=snapshot,
+                bet_id=bet_id,
+                run_dir=resolved_config.run_dir,
+            ),
+            refresh_kind="cached",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue
@@ -2122,9 +2353,11 @@ def handle_worker_request(
             "detail": result.detail,
         }
         snapshot["status_line"] = result.detail
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(snapshot, "live_capture")
-        }
+        response = build_worker_snapshot_response(
+            snapshot,
+            refresh_kind="live_capture",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, "smarkets"
@@ -2135,15 +2368,14 @@ def handle_worker_request(
         if not isinstance(query, dict):
             raise ValueError("LoadHorseMatcher payload must include query.")
         market_snapshot = capture_live_horse_market_snapshot(query)
-        response = {
-            "snapshot": annotate_snapshot_refresh_kind(
-                build_horse_matcher_snapshot_response(
-                    market_snapshot=market_snapshot,
-                    selected_venue=effective_selected_venue,
-                ),
-                "live_capture",
-            )
-        }
+        response = build_worker_snapshot_response(
+            build_horse_matcher_snapshot_response(
+                market_snapshot=market_snapshot,
+                selected_venue=effective_selected_venue,
+            ),
+            refresh_kind="live_capture",
+            run_dir=resolved_config.run_dir,
+        )
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue

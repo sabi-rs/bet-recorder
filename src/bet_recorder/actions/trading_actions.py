@@ -6,8 +6,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from bet_recorder.browser.agent_browser import AgentBrowserClient
+from bet_recorder.capture.operator_interaction import append_operator_interaction_event
 from bet_recorder.capture.run_bundle import load_run_bundle
 from bet_recorder.live.agent_browser_capture import capture_agent_browser_action
+from bet_recorder.transport.writer import append_transport_marker
 
 SMARKETS_HOSTS = {"smarkets.com", "www.smarkets.com"}
 SMARKETS_PORTFOLIO_URL = "https://smarkets.com/portfolio/?time=all&order-state=active"
@@ -232,42 +234,70 @@ def execute_trading_action(
         )
 
     client = AgentBrowserClient(session=agent_browser_session)
-    target_url = intent.deep_link_url or intent.event_url
-    assert_smarkets_target_url(target_url)
-    client.open_url(target_url)
-    client.wait(1200)
-
-    if not _betslip_is_visible(client):
-        if intent.event_url is None:
-            raise ValueError(
-                "Trading action deep link did not expose a populated Smarkets bet slip."
-            )
-        _populate_smarkets_bet_slip(client=client, intent=intent)
-
-    _set_smarkets_stake(client=client, stake=intent.stake)
-    verification = _verify_smarkets_bet_slip(client=client)
-    _assert_smarkets_bet_slip_matches_intent(intent=intent, verification=verification)
-
-    if intent.mode == "review":
-        result = TradingActionResult(
-            detail=(
-                f"Smarkets {intent.side} {intent.selection_name} stake {intent.stake:.2f} "
-                f"loaded in review mode for {intent.event_name}."
-            ),
-            action_status="review_ready",
-        )
-    else:
-        _click_smarkets_place_bet(client=client)
-        client.wait(600)
-        result = _resolve_post_submit_result(client=client, intent=intent)
-
-    _record_trading_action(
-        client=client,
-        intent=intent,
+    _record_trading_action_marker(
         run_dir=run_dir,
-        action_status=result.action_status,
+        intent=intent,
+        phase="request",
+        status="requested",
+        detail=(
+            f"{intent.mode} {intent.side} {intent.selection_name} "
+            f"stake {intent.stake:.2f} at {intent.expected_price:.2f}"
+        ),
     )
-    return result
+
+    try:
+        target_url = intent.deep_link_url or intent.event_url
+        assert_smarkets_target_url(target_url)
+        client.open_url(target_url)
+        client.wait(1200)
+
+        if not _betslip_is_visible(client):
+            if intent.event_url is None:
+                raise ValueError(
+                    "Trading action deep link did not expose a populated Smarkets bet slip."
+                )
+            _populate_smarkets_bet_slip(client=client, intent=intent)
+
+        _set_smarkets_stake(client=client, stake=intent.stake)
+        verification = _verify_smarkets_bet_slip(client=client)
+        _assert_smarkets_bet_slip_matches_intent(intent=intent, verification=verification)
+
+        if intent.mode == "review":
+            result = TradingActionResult(
+                detail=(
+                    f"Smarkets {intent.side} {intent.selection_name} stake {intent.stake:.2f} "
+                    f"loaded in review mode for {intent.event_name}."
+                ),
+                action_status="review_ready",
+            )
+        else:
+            _click_smarkets_place_bet(client=client)
+            client.wait(600)
+            result = _resolve_post_submit_result(client=client, intent=intent)
+
+        _record_trading_action(
+            client=client,
+            intent=intent,
+            run_dir=run_dir,
+            action_status=result.action_status,
+        )
+        _record_trading_action_marker(
+            run_dir=run_dir,
+            intent=intent,
+            phase="response",
+            status=result.action_status,
+            detail=result.detail,
+        )
+        return result
+    except Exception as exc:
+        _record_trading_action_marker(
+            run_dir=run_dir,
+            intent=intent,
+            phase="response",
+            status="error",
+            detail=str(exc),
+        )
+        raise
 
 
 def assert_smarkets_target_url(url: str | None) -> None:
@@ -790,6 +820,57 @@ def _record_trading_action(
             "reduce_only": intent.risk_report.reduce_only,
         },
     )
+
+
+def _record_trading_action_marker(
+    *,
+    run_dir: Path | None,
+    intent: TradingActionIntent,
+    phase: str,
+    status: str,
+    detail: str,
+) -> None:
+    if run_dir is None:
+        return
+    bundle = load_run_bundle(source="smarkets_exchange", run_dir=run_dir)
+    bundle.events_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle.events_path.touch(exist_ok=True)
+    append_operator_interaction_event(
+        bundle.events_path,
+        action="place_bet",
+        status=f"{phase}:{status}",
+        detail=detail,
+        request_id=intent.request_id,
+        reference_id=intent.source_ref or None,
+        metadata={
+            "venue": intent.venue,
+            "mode": intent.mode,
+            "side": intent.side,
+            "stake": intent.stake,
+            "expected_price": intent.expected_price,
+            "event_name": intent.event_name,
+            "market_name": intent.market_name,
+            "selection_name": intent.selection_name,
+        },
+    )
+    if bundle.transport_path is not None:
+        append_transport_marker(
+            bundle.transport_path,
+            action="place_bet",
+            phase=phase,
+            detail=detail,
+            request_id=intent.request_id,
+            reference_id=intent.source_ref or None,
+            metadata={
+                "venue": intent.venue,
+                "mode": intent.mode,
+                "side": intent.side,
+                "stake": intent.stake,
+                "selection_name": intent.selection_name,
+                "event_name": intent.event_name,
+                "status": status,
+            },
+        )
 
 
 def _betslip_is_visible(client: AgentBrowserClient) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 import json
 import re
@@ -11,6 +12,31 @@ def append_transport_event(transport_path: Path, event: dict) -> None:
   sanitized = _sanitize_value(event)
   with transport_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(sanitized) + "\n")
+
+
+def append_transport_marker(
+  transport_path: Path,
+  *,
+  action: str,
+  phase: str,
+  detail: str,
+  request_id: str | None = None,
+  reference_id: str | None = None,
+  metadata: dict | None = None,
+) -> None:
+  append_transport_event(
+    transport_path,
+    {
+      "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+      "kind": "interaction_marker",
+      "action": action,
+      "phase": phase,
+      "detail": detail,
+      "request_id": request_id,
+      "reference_id": reference_id,
+      "metadata": metadata or {},
+    },
+  )
 
 
 def _sanitize_value(value):

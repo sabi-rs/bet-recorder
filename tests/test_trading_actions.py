@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import json
 
 import pytest
 
@@ -108,6 +109,7 @@ def test_execute_trading_action_review_mode_uses_existing_betslip(
         "_record_trading_action",
         lambda **kwargs: recorded.setdefault("recorded", kwargs["action_status"]),
     )
+    (tmp_path / "transport.jsonl").touch()
 
     result = trading_actions.execute_trading_action(
         intent_payload=sample_intent(),
@@ -120,6 +122,19 @@ def test_execute_trading_action_review_mode_uses_existing_betslip(
     assert recorded["stake"] == 10.0
     assert recorded["recorded"] == "review_ready"
     assert "review mode" in result.detail
+    transport_events = [
+        json.loads(line) for line in (tmp_path / "transport.jsonl").read_text().splitlines()
+    ]
+    bundle_events = [
+        json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    assert [event["phase"] for event in transport_events] == ["request", "response"]
+    assert transport_events[0]["kind"] == "interaction_marker"
+    assert transport_events[0]["request_id"] == "positions-1"
+    assert [event["status"] for event in bundle_events] == [
+        "request:requested",
+        "response:review_ready",
+    ]
 
 
 def test_execute_trading_action_confirm_gtc_submits_without_fok_flow(
@@ -165,6 +180,7 @@ def test_execute_trading_action_confirm_gtc_submits_without_fok_flow(
         "_record_trading_action",
         lambda **kwargs: recorded.setdefault("recorded", kwargs["action_status"]),
     )
+    (tmp_path / "transport.jsonl").touch()
 
     result = trading_actions.execute_trading_action(
         intent_payload=sample_intent(
@@ -267,6 +283,42 @@ def test_execute_trading_action_requires_session() -> None:
             agent_browser_session=None,
             run_dir=None,
         )
+
+
+def test_execute_trading_action_records_error_marker_before_reraising(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeAgentBrowserClient()
+
+    monkeypatch.setattr(
+        trading_actions,
+        "AgentBrowserClient",
+        lambda session=None: _bind_session(client, session),
+    )
+    monkeypatch.setattr(
+        trading_actions,
+        "_betslip_is_visible",
+        lambda client: (_ for _ in ()).throw(ValueError("betslip probe failed")),
+    )
+    (tmp_path / "transport.jsonl").touch()
+
+    with pytest.raises(ValueError, match="betslip probe failed"):
+        trading_actions.execute_trading_action(
+            intent_payload=sample_intent(),
+            agent_browser_session="helium-copy",
+            run_dir=tmp_path,
+        )
+
+    transport_events = [
+        json.loads(line) for line in (tmp_path / "transport.jsonl").read_text().splitlines()
+    ]
+    bundle_events = [
+        json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    assert [event["phase"] for event in transport_events] == ["request", "response"]
+    assert transport_events[-1]["detail"] == "betslip probe failed"
+    assert bundle_events[-1]["status"] == "response:error"
 
 
 def _bind_session(

@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import json
 
 import pytest
 
@@ -33,6 +34,30 @@ def test_cash_out_tracked_bet_refuses_until_execution_contract_is_captured() -> 
     assert updated["worker"]["status"] == "error"
     assert "execution contract is not implemented yet" in updated["worker"]["detail"]
     assert "execution contract is not implemented yet" in updated["status_line"]
+
+
+def test_cash_out_tracked_bet_records_request_and_response_markers(tmp_path: Path) -> None:
+    snapshot = sample_snapshot()
+    (tmp_path / "transport.jsonl").touch()
+
+    updated = handle_cash_out_tracked_bet(
+        snapshot=snapshot,
+        bet_id="bet-001",
+        run_dir=tmp_path,
+    )
+
+    assert updated["worker"]["status"] == "error"
+    assert "execution contract is not implemented yet" in updated["worker"]["detail"]
+    assert "execution contract is not implemented yet" in updated["status_line"]
+    transport_events = [
+        json.loads(line) for line in (tmp_path / "transport.jsonl").read_text().splitlines()
+    ]
+    bundle_events = [
+        json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    assert [event["phase"] for event in transport_events] == ["request", "response"]
+    assert bundle_events[0]["action"] == "cash_out"
+    assert bundle_events[1]["status"] == "response:not_implemented"
 
 
 def test_worker_request_rejects_generic_bet_placement_request() -> None:

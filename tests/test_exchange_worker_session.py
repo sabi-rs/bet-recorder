@@ -83,6 +83,160 @@ def test_exchange_worker_session_handles_multiple_ndjson_requests(
     assert responses[2]["snapshot"]["watch"]["watch_count"] == 2
 
 
+def test_exchange_worker_session_attaches_recorder_bundle_evidence(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T11:58:00Z",
+                        "source": "smarkets_exchange",
+                        "kind": "positions_snapshot",
+                        "page": "open_positions",
+                        "url": "https://smarkets.com/event/1",
+                        "document_title": "Open positions",
+                        "body_text": (
+                            "Available balance £120.45 Exposure £41.63 Unrealized P/L -£0.49 "
+                            "Lazio vs Sassuolo "
+                            "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 (3.13%) "
+                            "Order filled Trade out"
+                        ),
+                        "interactive_snapshot": [],
+                        "links": [],
+                        "inputs": {},
+                        "visible_actions": ["Trade out"],
+                        "resource_hosts": [],
+                        "local_storage_keys": [],
+                        "screenshot_path": None,
+                        "notes": ["seed snapshot"],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T11:59:00Z",
+                        "source": "smarkets_exchange",
+                        "kind": "watch_plan_snapshot",
+                        "page": "open_positions",
+                        "commission_rate": 0.0,
+                        "target_profit": 1.0,
+                        "stop_loss": 1.0,
+                        "position_count": 1,
+                        "watch_count": 1,
+                        "watches": [],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T11:59:45Z",
+                        "source": "operator_console",
+                        "kind": "operator_interaction",
+                        "page": "worker_request",
+                        "action": "place_bet",
+                        "status": "response:submitted",
+                        "request_id": "req-1",
+                        "reference_id": "bet-1",
+                        "detail": "loaded in review mode",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T12:00:00Z",
+                        "source": "smarkets_exchange",
+                        "kind": "action_snapshot",
+                        "page": "betslip",
+                        "action": "place_order",
+                        "target": "Draw",
+                        "status": "submitted",
+                        "url": "https://smarkets.com/betslip",
+                        "document_title": "Betslip",
+                        "body_text": "",
+                        "interactive_snapshot": [],
+                        "links": [],
+                        "inputs": {},
+                        "visible_actions": [],
+                        "resource_hosts": [],
+                        "local_storage_keys": [],
+                        "screenshot_path": None,
+                        "notes": ["submitted from console"],
+                        "metadata": {},
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    (run_dir / "transport.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T11:59:30Z",
+                        "kind": "interaction_marker",
+                        "action": "place_bet",
+                        "phase": "request",
+                        "request_id": "req-1",
+                        "reference_id": "bet-1",
+                        "detail": "review buy Draw stake 10.00 at 5.00",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T12:00:01Z",
+                        "kind": "interaction_marker",
+                        "action": "place_bet",
+                        "phase": "response",
+                        "request_id": "req-1",
+                        "reference_id": "bet-1",
+                        "detail": "loaded in review mode",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    response, resolved_config = handle_worker_request(
+        request="LoadDashboard",
+        config=WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            agent_browser_session=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+        ),
+    )
+
+    assert resolved_config.run_dir == run_dir
+    snapshot = response["snapshot"]
+    assert snapshot["recorder_bundle"]["event_count"] == 4
+    assert snapshot["recorder_bundle"]["latest_event_kind"] == "action_snapshot"
+    assert snapshot["recorder_bundle"]["latest_event_at"] == "2026-03-20T12:00:00Z"
+    assert snapshot["recorder_events"][0]["kind"] == "action_snapshot"
+    assert snapshot["recorder_events"][0]["summary"] == "place_order Draw -> submitted"
+    assert snapshot["recorder_events"][1]["kind"] == "operator_interaction"
+    assert snapshot["recorder_events"][1]["request_id"] == "req-1"
+    assert snapshot["recorder_events"][1]["reference_id"] == "bet-1"
+    assert snapshot["recorder_events"][1]["status"] == "response:submitted"
+    assert snapshot["recorder_events"][2]["kind"] == "watch_plan_snapshot"
+    assert "Watch plan refreshed" in snapshot["recorder_events"][2]["summary"]
+    assert snapshot["recorder_events"][3]["kind"] == "positions_snapshot"
+    assert snapshot["transport_summary"]["marker_count"] == 2
+    assert snapshot["transport_summary"]["latest_marker_phase"] == "response"
+    assert snapshot["transport_events"][0]["phase"] == "response"
+    assert snapshot["transport_events"][0]["request_id"] == "req-1"
+    assert snapshot["transport_events"][1]["phase"] == "request"
+
+
 def test_load_historical_positions_groups_settled_market_pnl_across_matched_entries(
     tmp_path: Path,
 ) -> None:

@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import json
+from urllib.error import URLError
 
 import pytest
 from typer.testing import CliRunner
@@ -58,7 +59,7 @@ def test_exchange_worker_session_handles_multiple_ndjson_requests(
         input="\n".join(
             [
                 load_dashboard_request,
-                json.dumps(json.loads(fixture_text("refresh_request.json"))),
+                json.dumps("RefreshCached"),
                 json.dumps(json.loads(fixture_text("select_venue_request.json"))),
                 "",
             ],
@@ -547,7 +548,7 @@ def test_exchange_worker_session_keeps_running_after_request_error(
     result = runner.invoke(
         app,
         ["exchange-worker-session"],
-        input=f"{load_dashboard_request}\n{json.dumps('Refresh')}\n",
+        input=f"{load_dashboard_request}\n{json.dumps('RefreshCached')}\n",
     )
 
     assert result.exit_code == 0
@@ -630,7 +631,7 @@ def test_handle_worker_request_line_preserves_config_after_request_error(
     )
 
     success_response, refreshed_config = handle_worker_request_line(
-        request_line=json.dumps("Refresh"),
+        request_line=json.dumps("RefreshCached"),
         config=resolved_config,
     )
 
@@ -738,7 +739,7 @@ def test_load_exchange_snapshot_captures_live_open_positions_before_reading_run_
     assert snapshot["runtime"]["source"] == "positions_snapshot"
 
 
-def test_refresh_request_uses_run_dir_state_without_live_recap(
+def test_refresh_cached_request_uses_run_dir_state_without_live_recap(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -829,17 +830,116 @@ def test_refresh_request_uses_run_dir_state_without_live_recap(
         config=None,
     )
     refresh_response, _ = handle_worker_request(
-        request="Refresh",
+        request="RefreshCached",
         config=resolved_config,
     )
 
     assert capture_count == 0
+    assert first_response["snapshot"]["runtime"]["refresh_kind"] == "bootstrap"
     assert first_response["snapshot"]["runtime"]["source"] == "watcher-state"
+    assert refresh_response["snapshot"]["runtime"]["refresh_kind"] == "cached"
     assert refresh_response["snapshot"]["runtime"]["source"] == "watcher-state"
     assert (
         refresh_response["snapshot"]["runtime"]["session"]["current_url"]
         == "https://smarkets.com/portfolio/"
     )
+
+
+def test_refresh_live_request_recaptures_smarkets_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    events_path = run_dir / "events.jsonl"
+    events_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-11T11:05:00Z",
+                "source": "smarkets_exchange",
+                "kind": "positions_snapshot",
+                "page": "open_positions",
+                "url": "https://smarkets.com/portfolio/",
+                "document_title": "Open positions",
+                "body_text": (
+                    "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
+                    "Lazio vs Sassuolo "
+                    "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 "
+                    "(3.13%) Order filled Trade out Back 4.80"
+                ),
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+                "resource_hosts": ["smarkets.com"],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": [],
+            },
+        )
+        + "\n",
+    )
+
+    capture_count = 0
+
+    def fake_capture(config: WorkerConfig) -> None:
+        nonlocal capture_count
+        capture_count += 1
+        events_path.write_text(
+            json.dumps(
+                {
+                    "captured_at": "2026-03-11T11:06:00Z",
+                    "source": "smarkets_exchange",
+                    "kind": "positions_snapshot",
+                    "page": "open_positions",
+                    "url": "https://smarkets.com/open-positions",
+                    "document_title": "Open positions",
+                    "body_text": (
+                        "Available balance £160.00 Exposure £19.00 Unrealized P/L £3.10 "
+                        "Lazio vs Sassuolo "
+                        "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 "
+                        "(3.13%) Order filled Trade out Back 4.70"
+                    ),
+                    "interactive_snapshot": [],
+                    "links": [],
+                    "inputs": {},
+                    "visible_actions": ["Trade out"],
+                    "resource_hosts": ["smarkets.com"],
+                    "local_storage_keys": [],
+                    "screenshot_path": None,
+                    "notes": ["manual-live-refresh"],
+                },
+            )
+            + "\n",
+        )
+
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_smarkets_open_positions",
+        fake_capture,
+    )
+
+    config = WorkerConfig(
+        positions_payload_path=None,
+        run_dir=run_dir,
+        account_payload_path=None,
+        open_bets_payload_path=None,
+        companion_legs_path=None,
+        commission_rate=0.0,
+        target_profit=1.0,
+        stop_loss=1.0,
+        hard_margin_call_profit_floor=None,
+        warn_only_default=True,
+        agent_browser_session="helium-copy",
+    )
+
+    refresh_response, _ = handle_worker_request(
+        request="RefreshLive",
+        config=config,
+    )
+
+    assert capture_count == 1
+    assert refresh_response["snapshot"]["runtime"]["refresh_kind"] == "live_capture"
+    assert refresh_response["snapshot"]["account_stats"]["available_balance"] == 160.0
 
 
 def test_load_exchange_snapshot_uses_watcher_state_runtime_when_available(
@@ -1619,7 +1719,112 @@ def test_handle_worker_request_line_persists_selected_live_venue(
     assert response["snapshot"]["selected_venue"] == "bet365"
 
 
-def test_load_exchange_snapshot_handles_missing_live_tab_gracefully() -> None:
+def test_handle_worker_request_line_preserves_selected_venue_after_invalid_select() -> None:
+    config = WorkerConfig(
+        positions_payload_path=Path("/tmp/unused-positions.json"),
+        run_dir=None,
+        account_payload_path=None,
+        open_bets_payload_path=None,
+        companion_legs_path=None,
+        commission_rate=0.0,
+        target_profit=1.0,
+        stop_loss=1.0,
+        hard_margin_call_profit_floor=None,
+        warn_only_default=True,
+        agent_browser_session=None,
+    )
+
+    response, next_config, next_selected_venue = handle_worker_request_line(
+        request_line=json.dumps({"SelectVenue": {"venue": "betfair"}}),
+        config=config,
+        selected_venue="bet365",
+    )
+
+    assert next_config == config
+    assert next_selected_venue == "bet365"
+    assert response["request_error"] == "Unsupported venue for recorder worker: betfair"
+    assert response["snapshot"]["selected_venue"] is None
+
+
+def test_refresh_cached_reuses_cached_live_venue_snapshot(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_live_venue_payload",
+        lambda venue: (_ for _ in ()).throw(
+            AssertionError("cached refresh should not capture live venue payload")
+        ),
+    )
+
+    config = WorkerConfig(
+        positions_payload_path=Path("/tmp/unused-positions.json"),
+        run_dir=None,
+        account_payload_path=None,
+        open_bets_payload_path=None,
+        companion_legs_path=None,
+        commission_rate=0.0,
+        target_profit=1.0,
+        stop_loss=1.0,
+        hard_margin_call_profit_floor=None,
+        warn_only_default=True,
+        agent_browser_session=None,
+    )
+    cached_snapshot = {
+        "worker": {
+            "name": "bet-recorder",
+            "status": "ready",
+            "detail": "bet365 cache",
+        },
+        "venues": [],
+        "selected_venue": "bet365",
+        "events": [],
+        "markets": [],
+        "preflight": None,
+        "status_line": "bet365 cache",
+        "runtime": {
+            "updated_at": "2026-03-11T11:05:00Z",
+            "source": "bet365:my_bets",
+            "refresh_kind": "live_capture",
+            "decision_count": 0,
+            "watcher_iteration": None,
+            "stale": False,
+        },
+        "account_stats": None,
+        "open_positions": [],
+        "historical_positions": [],
+        "ledger_pnl_summary": {},
+        "other_open_bets": [],
+        "decisions": [],
+        "watch": None,
+        "tracked_bets": [],
+        "exit_policy": {},
+        "exit_recommendations": [],
+    }
+
+    response, next_config, next_selected_venue = handle_worker_request_line(
+        request_line=json.dumps("RefreshCached"),
+        config=config,
+        selected_venue="bet365",
+        cached_snapshot=cached_snapshot,
+    )
+
+    assert next_config == config
+    assert next_selected_venue == "bet365"
+    assert response["snapshot"]["selected_venue"] == "bet365"
+    assert response["snapshot"]["status_line"] == "bet365 cache"
+    assert response["snapshot"]["runtime"]["refresh_kind"] == "cached"
+
+
+def test_load_exchange_snapshot_handles_missing_live_tab_gracefully(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.list_debug_targets",
+        lambda: (_ for _ in ()).throw(
+            URLError(OSError(1, "Operation not permitted"))
+        ),
+    )
+
     snapshot = load_exchange_snapshot_for_config(
         WorkerConfig(
             positions_payload_path=Path("/tmp/unused-positions.json"),
@@ -1640,7 +1845,7 @@ def test_load_exchange_snapshot_handles_missing_live_tab_gracefully() -> None:
     assert snapshot["selected_venue"] == "betfred"
     assert snapshot["other_open_bets"] == []
     assert snapshot["worker"]["status"] == "error"
-    assert "Could not find a CDP target" in snapshot["status_line"]
+    assert "Operation not permitted" in snapshot["status_line"]
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1445,11 +1446,26 @@ def load_exchange_snapshot_for_config(
     *,
     selected_venue: str = DEFAULT_SELECTED_VENUE,
     capture_live: bool = True,
+    cached_snapshot: dict | None = None,
 ) -> dict:
     if selected_venue != "smarkets":
+        if not capture_live:
+            if (
+                isinstance(cached_snapshot, dict)
+                and cached_snapshot.get("selected_venue") == selected_venue
+            ):
+                return deepcopy(cached_snapshot)
+            return build_unavailable_live_venue_snapshot(
+                venue=selected_venue,
+                detail=(
+                    f"No cached {selected_venue} snapshot is available. "
+                    "Use live recapture or reselect the venue."
+                ),
+                config=config,
+            )
         try:
             payload = capture_current_live_venue_payload(selected_venue)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return build_unavailable_live_venue_snapshot(
                 venue=selected_venue,
                 detail=str(exc),
@@ -1754,6 +1770,7 @@ def build_runtime_summary(
     runtime = {
         "updated_at": str(positions_payload.get("captured_at", "")),
         "source": "positions_snapshot",
+        "refresh_kind": "live_capture",
         "decision_count": 0,
         "watcher_iteration": None,
         "stale": False,
@@ -1863,12 +1880,22 @@ def load_decisions(*, run_dir: Path | None) -> list[dict]:
 
 
 def parse_worker_request(request: str | dict) -> tuple[str, dict | None]:
-    if isinstance(request, str) and request in {"LoadDashboard", "Refresh"}:
+    if isinstance(request, str) and request in {
+        "LoadDashboard",
+        "Refresh",
+        "RefreshCached",
+        "RefreshLive",
+    }:
         return request, None
 
     if isinstance(request, dict) and len(request) == 1:
         request_name, request_payload = next(iter(request.items()))
-        if request_name in {"LoadDashboard", "Refresh"}:
+        if request_name in {
+            "LoadDashboard",
+            "Refresh",
+            "RefreshCached",
+            "RefreshLive",
+        }:
             if request_payload is None:
                 return request_name, None
             if not isinstance(request_payload, dict):
@@ -1945,11 +1972,21 @@ def build_worker_request_error_response(detail: str) -> dict:
     }
 
 
+def annotate_snapshot_refresh_kind(snapshot: dict, refresh_kind: str) -> dict:
+    runtime = snapshot.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+        snapshot["runtime"] = runtime
+    runtime["refresh_kind"] = refresh_kind
+    return snapshot
+
+
 def handle_worker_request(
     *,
     request: str | dict,
     config: WorkerConfig | None,
     selected_venue: str | None = None,
+    cached_snapshot: dict | None = None,
 ):
     effective_selected_venue = selected_venue or DEFAULT_SELECTED_VENUE
     request_name, request_payload = parse_worker_request(request)
@@ -1964,6 +2001,7 @@ def handle_worker_request(
                 resolved_config,
                 selected_venue=effective_selected_venue,
                 capture_live=False,
+                cached_snapshot=cached_snapshot,
             )
         except ValueError as exc:
             if _should_return_waiting_snapshot(resolved_config, exc):
@@ -1973,19 +2011,41 @@ def handle_worker_request(
                 )
             else:
                 raise
-        response = {"snapshot": snapshot}
+        response = {
+            "snapshot": annotate_snapshot_refresh_kind(snapshot, "bootstrap")
+        }
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, effective_selected_venue
 
     resolved_config = require_worker_config(config, request_name)
 
-    if request_name == "Refresh":
+    if request_name in {"Refresh", "RefreshLive"}:
         response = {
-            "snapshot": load_exchange_snapshot_for_config(
-                resolved_config,
-                selected_venue=effective_selected_venue,
-                capture_live=(effective_selected_venue != "smarkets"),
+            "snapshot": annotate_snapshot_refresh_kind(
+                load_exchange_snapshot_for_config(
+                    resolved_config,
+                    selected_venue=effective_selected_venue,
+                    capture_live=True,
+                    cached_snapshot=cached_snapshot,
+                ),
+                "live_capture",
+            )
+        }
+        if selected_venue is None:
+            return response, resolved_config
+        return response, resolved_config, effective_selected_venue
+
+    if request_name == "RefreshCached":
+        response = {
+            "snapshot": annotate_snapshot_refresh_kind(
+                load_exchange_snapshot_for_config(
+                    resolved_config,
+                    selected_venue=effective_selected_venue,
+                    capture_live=False,
+                    cached_snapshot=cached_snapshot,
+                ),
+                "cached",
             )
         }
         if selected_venue is None:
@@ -2001,10 +2061,14 @@ def handle_worker_request(
         if venue not in {"smarkets", *LIVE_VENUE_DEFINITIONS.keys()}:
             raise ValueError(f"Unsupported venue for recorder worker: {venue}")
         response = {
-            "snapshot": load_exchange_snapshot_for_config(
-                resolved_config,
-                selected_venue=venue,
-                capture_live=(venue != "smarkets"),
+            "snapshot": annotate_snapshot_refresh_kind(
+                load_exchange_snapshot_for_config(
+                    resolved_config,
+                    selected_venue=venue,
+                    capture_live=(venue != "smarkets"),
+                    cached_snapshot=cached_snapshot,
+                ),
+                "live_capture" if venue != "smarkets" else "cached",
             )
         }
         if selected_venue is None:
@@ -2021,9 +2085,13 @@ def handle_worker_request(
             resolved_config,
             selected_venue=effective_selected_venue,
             capture_live=False,
+            cached_snapshot=cached_snapshot,
         )
         response = {
-            "snapshot": handle_cash_out_tracked_bet(snapshot=snapshot, bet_id=bet_id)
+            "snapshot": annotate_snapshot_refresh_kind(
+                handle_cash_out_tracked_bet(snapshot=snapshot, bet_id=bet_id),
+                "cached",
+            )
         }
         if selected_venue is None:
             return response, resolved_config
@@ -2046,6 +2114,7 @@ def handle_worker_request(
             resolved_config,
             selected_venue="smarkets",
             capture_live=True,
+            cached_snapshot=cached_snapshot,
         )
         snapshot["worker"] = {
             **dict(snapshot.get("worker") or {}),
@@ -2053,7 +2122,9 @@ def handle_worker_request(
             "detail": result.detail,
         }
         snapshot["status_line"] = result.detail
-        response = {"snapshot": snapshot}
+        response = {
+            "snapshot": annotate_snapshot_refresh_kind(snapshot, "live_capture")
+        }
         if selected_venue is None:
             return response, resolved_config
         return response, resolved_config, "smarkets"
@@ -2065,9 +2136,12 @@ def handle_worker_request(
             raise ValueError("LoadHorseMatcher payload must include query.")
         market_snapshot = capture_live_horse_market_snapshot(query)
         response = {
-            "snapshot": build_horse_matcher_snapshot_response(
-                market_snapshot=market_snapshot,
-                selected_venue=effective_selected_venue,
+            "snapshot": annotate_snapshot_refresh_kind(
+                build_horse_matcher_snapshot_response(
+                    market_snapshot=market_snapshot,
+                    selected_venue=effective_selected_venue,
+                ),
+                "live_capture",
             )
         }
         if selected_venue is None:
@@ -2082,6 +2156,7 @@ def handle_worker_request_line(
     request_line: str,
     config: WorkerConfig | None,
     selected_venue: str | None = None,
+    cached_snapshot: dict | None = None,
 ):
     effective_selected_venue = selected_venue or DEFAULT_SELECTED_VENUE
     next_config = config
@@ -2094,17 +2169,17 @@ def handle_worker_request_line(
                 request_payload,
                 config=config,
             )
-        if request_name == "SelectVenue" and request_payload is not None:
-            next_selected_venue = str(request_payload.get("venue") or next_selected_venue)
         if selected_venue is None:
             return handle_worker_request(
                 request=request,
                 config=config,
+                cached_snapshot=cached_snapshot,
             )
         return handle_worker_request(
             request=request,
             config=config,
             selected_venue=effective_selected_venue,
+            cached_snapshot=cached_snapshot,
         )
     except ValueError as exc:
         if selected_venue is None:
@@ -2118,6 +2193,7 @@ def iter_worker_session_responses(
 ) -> Iterator[dict]:
     config: WorkerConfig | None = None
     selected_venue = DEFAULT_SELECTED_VENUE
+    cached_snapshot: dict | None = None
     for request_line in request_lines:
         normalized_request_line = request_line.strip()
         if not normalized_request_line:
@@ -2126,7 +2202,10 @@ def iter_worker_session_responses(
             request_line=normalized_request_line,
             config=config,
             selected_venue=selected_venue,
+            cached_snapshot=cached_snapshot,
         )
+        if "request_error" not in response:
+            cached_snapshot = deepcopy(response.get("snapshot"))
         yield response
 
 

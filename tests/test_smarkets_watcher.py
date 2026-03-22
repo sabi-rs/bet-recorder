@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import json
@@ -20,6 +21,7 @@ from bet_recorder.watcher import (  # noqa: E402
     acquire_watcher_process_slot,
     capture_current_smarkets_open_positions,
     bootstrap_smarkets_page,
+    build_exchange_snapshot_from_payload,
     build_session_diagnostics,
     ensure_smarkets_authenticated,
     load_smarkets_credentials,
@@ -94,6 +96,52 @@ def test_run_smarkets_watcher_captures_and_writes_latest_state(
     assert (run_dir / "events.jsonl").exists()
     assert (run_dir / "metadata.json").exists()
     assert (run_dir / "screenshots").is_dir()
+
+
+def test_build_exchange_snapshot_from_payload_surfaces_capture_warnings() -> None:
+    payload = {
+        "captured_at": "2026-03-11T12:05:00Z",
+        "source": "smarkets_exchange",
+        "kind": "positions_snapshot",
+        "page": "open_positions",
+        "url": "https://smarkets.com/open-positions",
+        "document_title": "Open positions",
+        "body_text": (
+            "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
+            "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open "
+            "Lazio vs Sassuolo "
+            "Sell 1 - 1 Correct score 7.2 £2.55 £15.81 £18.36 £2.46 £1.20 (3.53%) Order filled Trade out "
+            "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£1.31 (3.13%) Order filled Trade out"
+        ),
+        "interactive_snapshot": [],
+        "links": [],
+        "inputs": {},
+        "visible_actions": ["Trade out"],
+        "resource_hosts": ["smarkets.com"],
+        "local_storage_keys": [],
+        "screenshot_path": None,
+        "notes": ["watcher-loop"],
+        "capture_warnings": [
+            "event summary capture failed: timeout",
+            "settled history capture failed: missing selector",
+        ],
+    }
+
+    snapshot = build_exchange_snapshot_from_payload(
+        payload,
+        WatcherConfig(
+            run_dir=Path("/tmp/smarkets-run"),
+            session="helium-copy",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+    )
+
+    assert snapshot["warnings"] == payload["capture_warnings"]
+    assert "Warnings:" in snapshot["worker"]["detail"]
+    assert "Warnings:" in snapshot["status_line"]
 
 
 def test_run_smarkets_watcher_persists_explicit_error_for_blank_session(
@@ -429,7 +477,7 @@ def test_with_navigation_retry_retries_execution_context_destroyed() -> None:
     assert calls["wait_ms"] == 500
 
 
-def test_acquire_watcher_process_slot_replaces_conflicting_process(
+def test_acquire_watcher_process_slot_rejects_conflicting_process(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -437,24 +485,19 @@ def test_acquire_watcher_process_slot_replaces_conflicting_process(
     run_dir.mkdir()
     pid_path = run_dir / "watcher.pid"
     pid_path.write_text("123\n")
-    terminated: list[int] = []
 
     monkeypatch.setattr(
         "bet_recorder.watcher._find_conflicting_watcher_pid",
         lambda run_dir_arg, pid_path_arg: 123,
     )
-    monkeypatch.setattr(
-        "bet_recorder.watcher._terminate_process",
-        lambda pid: terminated.append(pid),
-    )
 
-    acquire_watcher_process_slot(run_dir)
+    with pytest.raises(RuntimeError, match="Watcher already running"):
+        acquire_watcher_process_slot(run_dir)
 
-    assert terminated == [123]
-    assert pid_path.read_text().strip() == str(os.getpid())
+    assert pid_path.read_text().strip() == "123"
 
     release_watcher_process_slot(run_dir)
-    assert not pid_path.exists()
+    assert pid_path.exists()
 
 
 def test_next_poll_interval_uses_live_cadence_for_in_play_positions() -> None:
@@ -718,9 +761,7 @@ def test_capture_current_smarkets_open_positions_retries_try_again_overlay(
         fake_capture_agent_browser_page_state,
     )
     monkeypatch.setattr("bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None)
-    monkeypatch.setattr(
-        "bet_recorder.watcher.ensure_smarkets_activity_filter", lambda *, client: None
-    )
+    monkeypatch.setattr("bet_recorder.watcher.ensure_smarkets_activity_filter", lambda **_: None)
 
     run_dir = tmp_path / "smarkets-run"
     run_dir.mkdir()
@@ -993,9 +1034,11 @@ def test_capture_current_smarkets_open_positions_merges_scroll_captured_rows(
         def open_url(self, url: str) -> None:
             raise AssertionError(f"unexpected open_url({url})")
 
-        def capture_page_state(self, **_: object) -> BrowserPageState:
+        def capture_page_state(self, **kwargs: object) -> BrowserPageState:
+            page = str(kwargs.get("page", "open_positions"))
             self.capture_calls += 1
-            return first_state if self.capture_calls == 1 else second_state
+            state = first_state if self.capture_calls == 1 else second_state
+            return replace(state, page=page)
 
         def evaluate(self, script: str):
             if "advanced" in script and "max_top" in script:
@@ -1009,9 +1052,7 @@ def test_capture_current_smarkets_open_positions_merges_scroll_captured_rows(
             assert milliseconds == 200
 
     monkeypatch.setattr("bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None)
-    monkeypatch.setattr(
-        "bet_recorder.watcher.ensure_smarkets_activity_filter", lambda *, client: None
-    )
+    monkeypatch.setattr("bet_recorder.watcher.ensure_smarkets_activity_filter", lambda **_: None)
     monkeypatch.setattr(
         "bet_recorder.watcher._capture_event_summaries",
         lambda **_: [],
@@ -1039,9 +1080,12 @@ def test_capture_current_smarkets_open_positions_merges_scroll_captured_rows(
         for line in (run_dir / "events.jsonl").read_text().splitlines()
         if line.strip()
     ]
-    assert len(events) == 1
+    assert len(events) == 2
     assert events[0]["body_text"] == payload["body_text"]
+    assert events[0]["page"] == "open_positions"
     assert len(events[0]["metadata"]["smarkets_portfolio"]["positions"]) == 3
+    assert events[1]["page"] == "history"
+    assert events[1]["kind"] == "history_snapshot"
 
     positions = payload["event_summaries"]
     assert positions == []

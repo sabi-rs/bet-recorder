@@ -16,8 +16,9 @@ def test_append_transport_event_redacts_sensitive_fields(tmp_path: Path) -> None
       "headers": {
         "Cookie": "abc=123",
         "Authorization": "Bearer secret-token",
+        "X-API-Key": "secret-api-key",
       },
-      "preview": '{"access_token":"abc","refresh_token":"def","jwt":"eyJabc.def.ghi"}',
+      "preview": '{"access_token":"abc","refresh_token":"def","password":"super-secret","jwt":"eyJabc.def.ghi"}',
     },
   )
 
@@ -25,8 +26,10 @@ def test_append_transport_event_redacts_sensitive_fields(tmp_path: Path) -> None
 
   assert event["headers"]["Cookie"] == "[REDACTED]"
   assert event["headers"]["Authorization"] == "[REDACTED]"
+  assert event["headers"]["X-API-Key"] == "[REDACTED]"
   assert "[REDACTED]" in event["preview"]
   assert "secret-token" not in event["preview"]
+  assert "super-secret" not in event["preview"]
 
 
 def test_append_transport_event_appends_jsonl(tmp_path: Path) -> None:
@@ -66,3 +69,22 @@ def test_append_transport_marker_writes_sanitized_interaction_marker(
   assert event["reference_id"] == "bet-1"
   assert "[REDACTED]" in event["detail"]
   assert event["metadata"]["Authorization"] == "[REDACTED]"
+
+
+def test_append_transport_event_redacts_querystring_credentials(tmp_path: Path) -> None:
+  transport_path = tmp_path / "transport.jsonl"
+
+  append_transport_event(
+    transport_path,
+    {
+      "type": "http_request",
+      "url": "https://smarkets.com/login?password=secret&id_token=jwt-token",
+    },
+  )
+
+  event = json.loads(transport_path.read_text())
+
+  assert "password=secret" not in event["url"]
+  assert "id_token=jwt-token" not in event["url"]
+  assert "password=[REDACTED]" in event["url"]
+  assert "id_token=[REDACTED]" in event["url"]

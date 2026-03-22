@@ -6,6 +6,17 @@ import json
 import re
 
 JWT_RE = re.compile(r"eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+")
+SENSITIVE_TEXT_KEYS = (
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "password",
+  "passphrase",
+  "client_secret",
+  "api_key",
+  "apikey",
+  "session_token",
+)
 
 
 def append_transport_event(transport_path: Path, event: dict) -> None:
@@ -50,14 +61,34 @@ def _sanitize_value(value):
 
 
 def _sanitize_header(key: str, value):
-  if key.lower() in {"cookie", "set-cookie", "authorization"}:
+  lowered = key.lower()
+  if lowered in {
+    "cookie",
+    "set-cookie",
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "x-auth-token",
+  }:
     return "[REDACTED]"
   return _sanitize_value(value)
 
 
 def _sanitize_text(text: str) -> str:
   text = JWT_RE.sub("[REDACTED]", text)
-  text = re.sub(r'("access_token"\s*:\s*")([^"]+)(")', r"\1[REDACTED]\3", text, flags=re.I)
-  text = re.sub(r'("refresh_token"\s*:\s*")([^"]+)(")', r"\1[REDACTED]\3", text, flags=re.I)
+  for key in SENSITIVE_TEXT_KEYS:
+    text = re.sub(
+      rf'("{re.escape(key)}"\s*:\s*")([^"]+)(")',
+      r"\1[REDACTED]\3",
+      text,
+      flags=re.I,
+    )
+  query_key_pattern = "|".join(re.escape(key) for key in SENSITIVE_TEXT_KEYS)
+  text = re.sub(
+    rf"([?&](?:{query_key_pattern})=)([^&#\s]+)",
+    r"\1[REDACTED]",
+    text,
+    flags=re.I,
+  )
   text = re.sub(r"(Bearer\s+)[A-Za-z0-9._~-]+", r"\1[REDACTED]", text, flags=re.I)
   return text

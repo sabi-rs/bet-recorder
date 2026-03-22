@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 import json
+import stat
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -116,6 +117,9 @@ def test_write_watcher_state_persists_latest_json(tmp_path: Path) -> None:
   persisted = json.loads(output_path.read_text())
   assert persisted["decision_count"] == 1
   assert persisted["decisions"][0]["contract"] == "Draw"
+
+  mode = stat.S_IMODE(output_path.stat().st_mode)
+  assert mode & 0o077 == 0
 
 
 def test_build_watcher_error_state_marks_worker_error() -> None:

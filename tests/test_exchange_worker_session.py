@@ -434,6 +434,117 @@ def test_load_historical_positions_keeps_distinct_bets_separate_when_ids_differ(
     assert [row["contract"] for row in rows] == ["Arsenal", "Draw"]
 
 
+def test_load_exchange_snapshot_merges_run_bundle_history_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "DEFAULT_LEDGER_HISTORY_PATH",
+        tmp_path / "missing-statement-history.json",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T11:58:00Z",
+                        "source": "smarkets_exchange",
+                        "kind": "positions_snapshot",
+                        "page": "open_positions",
+                        "url": "https://smarkets.com/portfolio/?time=all&order-state=active",
+                        "document_title": "Open positions",
+                        "body_text": (
+                            "Available balance £120.45 Exposure £41.63 Unrealized P/L -£0.49 "
+                            "Lazio vs Sassuolo "
+                            "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 (3.13%) "
+                            "Order filled Trade out"
+                        ),
+                        "interactive_snapshot": [],
+                        "links": [],
+                        "inputs": {},
+                        "visible_actions": ["Trade out"],
+                        "resource_hosts": [],
+                        "local_storage_keys": [],
+                        "screenshot_path": None,
+                        "notes": ["seed snapshot"],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-20T12:00:00Z",
+                        "source": "smarkets_exchange",
+                        "kind": "history_snapshot",
+                        "page": "history",
+                        "url": "https://smarkets.com/portfolio/?time=all&order-state=settled",
+                        "document_title": "Settled orders",
+                        "body_text": "Settled orders",
+                        "interactive_snapshot": [],
+                        "links": [],
+                        "inputs": {},
+                        "visible_actions": [],
+                        "resource_hosts": [],
+                        "local_storage_keys": [],
+                        "screenshot_path": None,
+                        "notes": ["settled-history"],
+                        "metadata": {
+                            "smarkets_portfolio": {
+                                "extractor": "dom-v1",
+                                "groups": [],
+                                "positions": [
+                                    {
+                                        "side": "sell",
+                                        "contract": "Draw",
+                                        "market": "Full-time result",
+                                        "event": "Lazio vs Sassuolo",
+                                        "event_status": "Event ended|Serie A",
+                                        "event_url": "https://smarkets.com/football/italy-serie-a",
+                                        "price": 3.35,
+                                        "stake": 9.91,
+                                        "liability": 23.29,
+                                        "return_amount": 33.20,
+                                        "current_value": 9.60,
+                                        "pnl_amount": -0.31,
+                                        "pnl_percent": 3.13,
+                                        "status": "Settled",
+                                        "can_trade_out": False,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            agent_browser_session=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+        ),
+        selected_venue="smarkets",
+        capture_live=False,
+    )
+
+    assert len(snapshot["historical_positions"]) == 1
+    assert snapshot["historical_positions"][0]["event"] == "Lazio vs Sassuolo"
+    assert snapshot["historical_positions"][0]["market_status"] == "settled"
+    assert snapshot["historical_positions"][0]["live_clock"] == "2026-03-20T12:00:00Z"
+
+
 def test_load_ledger_pnl_summary_uses_raw_ledger_totals_and_builds_points(
     tmp_path: Path,
 ) -> None:

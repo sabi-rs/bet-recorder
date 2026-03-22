@@ -3,12 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import os
 from pathlib import Path
-import json
-import signal
 import time
-from urllib.parse import parse_qs, urlparse
+import json
+import os
 
 from bet_recorder.analysis.smarkets_exchange import (
     parse_event_page_body_summary,
@@ -32,6 +30,16 @@ from bet_recorder.watcher_state import (
     build_watcher_state,
     write_watcher_state,
 )
+from bet_recorder.watcher_browser import (
+    SMARKETS_ACTIVE_ACTIVITY_FILTER,
+    SMARKETS_SETTLED_ACTIVITY_FILTER,
+    accept_smarkets_cookies,
+    bootstrap_smarkets_page,
+    ensure_smarkets_activity_filter,
+    ensure_smarkets_authenticated,
+    load_smarkets_credentials,
+)
+from bet_recorder import watcher_storage
 
 
 @dataclass(frozen=True)
@@ -56,9 +64,31 @@ PORTFOLIO_SCROLL_CAPTURE_WAIT_MS = 200
 PORTFOLIO_SCROLL_CAPTURE_MAX_STEPS = 12
 SMARKETS_PORTFOLIO_METADATA_KEY = "smarkets_portfolio"
 SMARKETS_PORTFOLIO_EXTRACTOR_VERSION = "dom-v1"
-SMARKETS_ACTIVE_PORTFOLIO_URL = (
-    "https://smarkets.com/portfolio/?time=all&order-state=active"
-)
+_find_conflicting_watcher_pid = watcher_storage._find_conflicting_watcher_pid
+
+
+def ensure_watcher_run_dir(run_dir: Path) -> None:
+    watcher_storage.ensure_watcher_run_dir(run_dir)
+
+
+def acquire_watcher_process_slot(run_dir: Path) -> None:
+    pid_path = run_dir / "watcher.pid"
+    conflicting_pid = _find_conflicting_watcher_pid(run_dir, pid_path)
+    if conflicting_pid is not None:
+        raise RuntimeError(
+            f"Watcher already running for {run_dir} with pid {conflicting_pid}."
+        )
+    watcher_storage._write_private_text(pid_path, f"{os.getpid()}\n")
+
+
+def release_watcher_process_slot(run_dir: Path) -> None:
+    watcher_storage.release_watcher_process_slot(run_dir)
+
+
+def _record_capture_warning(payload: dict, warning: str) -> None:
+    warnings = payload.setdefault("capture_warnings", [])
+    if isinstance(warnings, list):
+        warnings.append(warning)
 
 
 def run_smarkets_watcher(
@@ -197,16 +227,31 @@ def capture_current_smarkets_open_positions(
         )
     try:
         positions_analysis = analyze_positions_payload(payload)
-    except Exception:
+    except Exception as error:
+        _record_capture_warning(
+            payload,
+            f"event summary capture skipped because positions analysis failed: {error}",
+        )
         return payload
 
-    payload["event_summaries"] = _capture_event_summaries(
-        client=client,
-        positions=positions_analysis["positions"],
+    try:
+        payload["event_summaries"] = _capture_event_summaries(
+            client=client,
+            positions=positions_analysis["positions"],
+            captured_at=captured_at,
+            cache=event_summary_cache,
+            sidecar_session=_event_summary_session_name(config.session),
+        )
+    except Exception as error:
+        payload["event_summaries"] = []
+        _record_capture_warning(payload, f"event summary capture failed: {error}")
+    history_warning = _capture_smarkets_settled_history_snapshot(
+        bundle=bundle,
         captured_at=captured_at,
-        cache=event_summary_cache,
-        sidecar_session=_event_summary_session_name(config.session),
+        client=client,
     )
+    if history_warning:
+        _record_capture_warning(payload, history_warning)
     return payload
 
 
@@ -233,6 +278,7 @@ def _capture_smarkets_open_positions_page_state(
         capture_page_state=capture_page_state,
         client=client,
         captured_at=captured_at,
+        page="open_positions",
         notes=notes,
     )]
     try:
@@ -246,6 +292,7 @@ def _capture_smarkets_open_positions_page_state(
                     capture_page_state=capture_page_state,
                     client=client,
                     captured_at=captured_at,
+                    page="open_positions",
                     notes=notes,
                 )
             )
@@ -267,10 +314,11 @@ def _capture_structured_smarkets_portfolio_state(
     capture_page_state,
     client,
     captured_at: datetime,
+    page: str,
     notes: list[str],
 ) -> BrowserPageState:
     page_state = capture_page_state(
-        page="open_positions",
+        page=page,
         captured_at=captured_at,
         screenshot_path=None,
         notes=list(notes),
@@ -294,6 +342,103 @@ def _capture_structured_smarkets_portfolio_state(
         screenshot_path=page_state.screenshot_path,
         notes=page_state.notes,
         metadata=metadata,
+    )
+
+
+def _capture_smarkets_settled_history_snapshot(
+    *,
+    bundle,
+    captured_at: datetime,
+    client,
+) -> str | None:
+    warning: str | None = None
+    try:
+        _with_navigation_retry(
+            lambda: ensure_smarkets_activity_filter(
+                client=client,
+                target_filter=SMARKETS_SETTLED_ACTIVITY_FILTER,
+            ),
+            client=client,
+        )
+        _with_navigation_retry(
+            lambda: _capture_smarkets_history_page_state(
+                bundle=bundle,
+                captured_at=captured_at,
+                client=client,
+                notes=["watcher-loop", "settled-history"],
+            ),
+            client=client,
+        )
+    except Exception as error:
+        warning = f"settled history capture failed: {error}"
+    finally:
+        try:
+            _with_navigation_retry(
+                lambda: ensure_smarkets_activity_filter(
+                    client=client,
+                    target_filter=SMARKETS_ACTIVE_ACTIVITY_FILTER,
+                ),
+                client=client,
+            )
+        except Exception as error:
+            if warning is None:
+                warning = f"active activity filter restore failed: {error}"
+    return warning
+
+
+def _capture_smarkets_history_page_state(
+    *,
+    bundle,
+    captured_at: datetime,
+    client,
+    notes: list[str],
+) -> dict:
+    capture_page_state = getattr(client, "capture_page_state", None)
+    evaluate = getattr(client, "evaluate", None)
+    if not callable(capture_page_state) or not callable(evaluate):
+        return capture_agent_browser_page_state(
+            source="smarkets_exchange",
+            bundle=bundle,
+            page="history",
+            captured_at=captured_at,
+            client=client,
+            notes=notes,
+        )
+
+    states = [
+        _capture_structured_smarkets_portfolio_state(
+            capture_page_state=capture_page_state,
+            client=client,
+            captured_at=captured_at,
+            page="history",
+            notes=notes,
+        )
+    ]
+    try:
+        for _ in range(PORTFOLIO_SCROLL_CAPTURE_MAX_STEPS):
+            metrics = _scroll_smarkets_portfolio_page(client=client)
+            if not metrics.get("advanced"):
+                break
+            client.wait(PORTFOLIO_SCROLL_CAPTURE_WAIT_MS)
+            states.append(
+                _capture_structured_smarkets_portfolio_state(
+                    capture_page_state=capture_page_state,
+                    client=client,
+                    captured_at=captured_at,
+                    page="history",
+                    notes=notes,
+                )
+            )
+            if metrics.get("at_end"):
+                break
+    finally:
+        _reset_smarkets_portfolio_scroll(client=client)
+
+    merged_state = _merge_browser_page_states(states)
+    return record_agent_browser_page_state(
+        source="smarkets_exchange",
+        bundle=bundle,
+        page_state=merged_state,
     )
 
 
@@ -648,246 +793,6 @@ def _click_smarkets_try_again(*, client) -> bool:
     return bool(clicked)
 
 
-def bootstrap_smarkets_page(*, client, profile_path: Path | None) -> None:
-    current_url = client.current_url()
-    if _is_smarkets_active_portfolio_url(current_url) or "open-positions" in current_url:
-        return
-    client.open_url(SMARKETS_ACTIVE_PORTFOLIO_URL)
-    client.wait(1500)
-
-
-def default_owned_smarkets_profile_path() -> Path:
-    home = Path(os.environ.get("HOME", "/tmp")).expanduser()
-    return home / ".config" / "smarkets-automation" / "profile"
-
-
-def ensure_smarkets_authenticated(*, client) -> None:
-    current_url = client.current_url()
-    if "login=true" not in current_url:
-        return
-
-    credentials = load_smarkets_credentials()
-    if credentials is None:
-        return
-
-    username, password = credentials
-    set_input_value = getattr(client, "set_input_value", None)
-    evaluate = getattr(client, "evaluate", None)
-    email_selector = 'input[autocomplete="email"], input[name="email"], input[type="email"]'
-    password_selector = (
-        'input[autocomplete="current-password"], input[name="password"], input[type="password"]'
-    )
-    submit_selector = 'button[type="submit"]'
-
-    submitted = False
-    if callable(set_input_value) and callable(evaluate):
-        try:
-            set_input_value(email_selector, username)
-            set_input_value(password_selector, password)
-            evaluate(
-                "() => {"
-                "const remember = document.querySelector('input[type=\"checkbox\"]');"
-                "if (remember instanceof HTMLInputElement && !remember.checked) {"
-                "remember.click();"
-                "}"
-                "const submit = Array.from(document.querySelectorAll('button')).find((element) => {"
-                "const text = (element.innerText || element.textContent || '').trim();"
-                "return text === 'Log in' && !element.disabled;"
-                "}) || Array.from(document.querySelectorAll('button[type=\"submit\"]')).find("
-                "(element) => !element.disabled"
-                ");"
-                "if (!(submit instanceof HTMLButtonElement)) {"
-                "throw new Error('Smarkets login submit button not found');"
-                "}"
-                "if (submit.disabled) {"
-                "throw new Error('Smarkets login submit button is still disabled');"
-                "}"
-                "const form = submit.form || submit.closest('form');"
-                "setTimeout(() => {"
-                "  if (form instanceof HTMLFormElement && typeof form.requestSubmit === 'function') {"
-                "    form.requestSubmit(submit);"
-                "    return;"
-                "  }"
-                "  submit.click();"
-                "}, 0);"
-                "return {"
-                "  submitted: true,"
-                "  method: (form instanceof HTMLFormElement && typeof form.requestSubmit === 'function') ? 'requestSubmit' : 'click',"
-                "  rememberMeChecked: !!(remember && remember.checked)"
-                "};"
-                "}"
-            )
-            submitted = True
-        except Exception:
-            submitted = False
-
-    if not submitted:
-        client.fill('input[type="email"]', username)
-        client.fill('input[type="password"]', password)
-        if callable(evaluate):
-            evaluate(
-                "() => {"
-                "const submit = Array.from(document.querySelectorAll('button')).find((element) => {"
-                "const text = (element.innerText || element.textContent || '').trim();"
-                "return text === 'Log in' && !element.disabled;"
-                "}) || Array.from(document.querySelectorAll('button[type=\"submit\"]')).find("
-                "(element) => !element.disabled"
-                ");"
-                "if (!(submit instanceof HTMLButtonElement)) {"
-                "throw new Error('Smarkets login submit button not found');"
-                "}"
-                "const form = submit.form || submit.closest('form');"
-                "if (form instanceof HTMLFormElement && typeof form.requestSubmit === 'function') {"
-                "form.requestSubmit(submit);"
-                "return { submitted: true, method: 'requestSubmit' };"
-                "}"
-                "submit.click();"
-                "return { submitted: true, method: 'click' };"
-                "}"
-            )
-        else:
-            client.click(submit_selector)
-
-    client.wait(1500)
-    for _ in range(8):
-        if "login=true" not in client.current_url():
-            break
-        client.wait(500)
-
-    current_url = client.current_url()
-    if "login=true" in current_url:
-        client.open_url(SMARKETS_ACTIVE_PORTFOLIO_URL)
-        client.wait(1500)
-
-
-def accept_smarkets_cookies(*, client) -> None:
-    evaluate = getattr(client, "evaluate", None)
-    if not callable(evaluate):
-        return
-
-    accepted = evaluate(
-        "(() => {"
-        "const button = Array.from(document.querySelectorAll('button')).find((element) => {"
-        "const text = (element.innerText || '').trim();"
-        "return text === 'Accept all cookies' || text === 'Accept only essential cookies';"
-        "});"
-        "if (!(button instanceof HTMLButtonElement)) {"
-        "return false;"
-        "}"
-        "button.click();"
-        "return true;"
-        "})()"
-    )
-    if accepted:
-        client.wait(500)
-
-
-def ensure_smarkets_activity_filter(*, client) -> None:
-    current_url = client.current_url()
-    if not current_url.startswith("https://smarkets.com/portfolio"):
-        return
-    if not callable(getattr(client, "evaluate", None)):
-        return
-
-    current_filter = _current_smarkets_activity_filter(client=client)
-    if current_filter == "All active" or current_filter is None:
-        return
-
-    client.evaluate(
-        "(() => {"
-        "const labels = new Set(["
-        "'All orders',"
-        "'All active',"
-        "'Filled orders',"
-        "'Unmatched orders',"
-        "'Settled orders'"
-        "]);"
-        "const combobox = Array.from(document.querySelectorAll('[role=\"combobox\"]')).find("
-        "(element) => labels.has((element.innerText || '').trim())"
-        ");"
-        "if (!(combobox instanceof HTMLElement)) {"
-        "throw new Error('Smarkets activity filter not found');"
-        "}"
-        "combobox.click();"
-        "const clickOption = () => {"
-        "const option = Array.from(document.querySelectorAll('[role=\"option\"]')).find("
-        "(element) => (element.innerText || '').trim() === 'All active'"
-        ");"
-        "if (!(option instanceof HTMLElement)) {"
-        "setTimeout(clickOption, 50);"
-        "return;"
-        "}"
-        "option.click();"
-        "};"
-        "setTimeout(clickOption, 0);"
-        "return true;"
-        "})()"
-    )
-    client.wait(750)
-    current_filter = _current_smarkets_activity_filter(client=client)
-    if current_filter != "All active":
-        raise ValueError(
-            f"Smarkets activity filter is not ready: expected 'All active', got {current_filter!r}"
-        )
-
-
-def _current_smarkets_activity_filter(*, client) -> str | None:
-    evaluate = getattr(client, "evaluate", None)
-    if not callable(evaluate):
-        return None
-    return evaluate(
-        "(() => {"
-        "const labels = new Set(["
-        "'All orders',"
-        "'All active',"
-        "'Filled orders',"
-        "'Unmatched orders',"
-        "'Settled orders'"
-        "]);"
-        "const combobox = Array.from(document.querySelectorAll('[role=\"combobox\"]')).find("
-        "(element) => labels.has((element.innerText || '').trim())"
-        ");"
-        "return combobox ? (combobox.innerText || '').trim() : null;"
-        "})()"
-    )
-
-
-def _is_smarkets_active_portfolio_url(url: str) -> bool:
-    if not url.startswith("https://smarkets.com/portfolio"):
-        return False
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-    return (
-        query.get("order-state", [None])[0] == "active"
-        and query.get("time", [None])[0] == "all"
-    )
-
-
-def load_smarkets_credentials(home: Path | None = None) -> tuple[str, str] | None:
-    username = os.environ.get("SMARKETS_USERNAME")
-    password = os.environ.get("SMARKETS_PASSWORD")
-    if username and password:
-        return username, password
-
-    dotenv_path = (home or Path.home()).expanduser() / ".env"
-    if not dotenv_path.exists():
-        return None
-
-    values: dict[str, str] = {}
-    for raw_line in dotenv_path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'").strip('"')
-
-    username = values.get("SMARKETS_USERNAME")
-    password = values.get("SMARKETS_PASSWORD")
-    if username and password:
-        return username, password
-    return None
-
-
 def build_exchange_snapshot_from_payload(payload: dict, config: WatcherConfig) -> dict:
     positions_analysis = analyze_positions_payload(payload)
     watch = build_smarkets_watch_plan(
@@ -908,6 +813,18 @@ def build_exchange_snapshot_from_payload(payload: dict, config: WatcherConfig) -
         f"Watcher updated {watch['watch_count']} Smarkets watch groups at "
         f"{payload['captured_at']}."
     )
+    warnings = [
+        str(warning).strip()
+        for warning in payload.get("capture_warnings", [])
+        if str(warning).strip()
+    ]
+    if warnings:
+        suffix = "; ".join(warnings[:2])
+        if len(warnings) > 2:
+            suffix = f"{suffix}; +{len(warnings) - 2} more"
+        snapshot["warnings"] = warnings
+        snapshot["worker"]["detail"] = f"{snapshot['worker']['detail']} Warnings: {suffix}"
+        snapshot["status_line"] = f"{snapshot['status_line']} Warnings: {suffix}"
     return snapshot
 
 
@@ -1189,83 +1106,3 @@ def _fetch_event_page_html(*, client, event_url: str) -> str:
 def _event_summary_session_name(session: str) -> str:
     normalized = session.strip() or "smarkets"
     return f"{normalized}-event-summary"
-
-
-def ensure_watcher_run_dir(run_dir: Path) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "screenshots").mkdir(parents=True, exist_ok=True)
-    (run_dir / "events.jsonl").touch(exist_ok=True)
-    metadata_path = run_dir / "metadata.json"
-    if not metadata_path.exists():
-        metadata_path.write_text(json.dumps({"source": "smarkets_exchange"}) + "\n")
-
-
-def acquire_watcher_process_slot(run_dir: Path) -> None:
-    pid_path = run_dir / "watcher.pid"
-    conflicting_pid = _find_conflicting_watcher_pid(run_dir, pid_path)
-    if conflicting_pid is not None:
-        _terminate_process(conflicting_pid)
-    pid_path.write_text(f"{os.getpid()}\n")
-
-
-def release_watcher_process_slot(run_dir: Path) -> None:
-    pid_path = run_dir / "watcher.pid"
-    if not pid_path.exists():
-        return
-    try:
-        recorded_pid = int(pid_path.read_text().strip())
-    except ValueError:
-        pid_path.unlink(missing_ok=True)
-        return
-    if recorded_pid == os.getpid():
-        pid_path.unlink(missing_ok=True)
-
-
-def _find_conflicting_watcher_pid(run_dir: Path, pid_path: Path) -> int | None:
-    if not pid_path.exists():
-        return None
-    try:
-        recorded_pid = int(pid_path.read_text().strip())
-    except ValueError:
-        return None
-    if recorded_pid == os.getpid():
-        return None
-    if not _process_is_alive(recorded_pid):
-        return None
-    if not _process_matches_run_dir(recorded_pid, run_dir):
-        return None
-    return recorded_pid
-
-
-def _process_matches_run_dir(pid: int, run_dir: Path) -> bool:
-    cmdline_path = Path(f"/proc/{pid}/cmdline")
-    if not cmdline_path.exists():
-        return False
-    try:
-        command = cmdline_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", "ignore")
-    except Exception:
-        return False
-    return "watch-smarkets-session" in command and str(run_dir) in command
-
-
-def _process_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def _terminate_process(pid: int) -> None:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return
-    for _ in range(20):
-        if not _process_is_alive(pid):
-            return
-        time.sleep(0.1)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except OSError:
-        return

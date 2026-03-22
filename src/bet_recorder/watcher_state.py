@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import json
+import os
 
 
 def build_watcher_state(
@@ -35,6 +36,7 @@ def build_watcher_state(
     "open_positions": snapshot.get("open_positions", []),
     "other_open_bets": snapshot.get("other_open_bets", []),
     "watch": snapshot.get("watch"),
+    "warnings": snapshot.get("warnings", []),
     "decision_count": len(decisions),
     "decisions": decisions,
   }
@@ -72,13 +74,30 @@ def build_watcher_error_state(
       "stop_loss": 0.0,
       "watches": [],
     },
+    "warnings": [],
     "decision_count": 0,
     "decisions": [],
   }
 
 
 def write_watcher_state(output_path: Path, state: dict) -> None:
-  output_path.write_text(json.dumps(state, indent=2) + "\n")
+  if output_path.parent:
+    output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+      output_path.parent.chmod(0o700)
+    except OSError:
+      pass
+  temp_path = output_path.with_name(f".{output_path.name}.tmp")
+  temp_path.write_text(json.dumps(state, indent=2) + "\n")
+  try:
+    os.chmod(temp_path, 0o600)
+  except OSError:
+    pass
+  temp_path.replace(output_path)
+  try:
+    os.chmod(output_path, 0o600)
+  except OSError:
+    pass
 
 
 def _build_decision(*, watch: dict, target_profit: float, stop_loss: float) -> dict:

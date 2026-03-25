@@ -1,0 +1,20 @@
+{
+  "count": {
+    "url": "https://sb2bethistory-gateway-altenar2.biahosted.com/api/WidgetReports/GetBetsCountWithEvents?culture=en-GB&timezoneOffset=0&integration=fanteam&deviceType=1&numFormat=en-GB&countryCode=GB",
+    "status": 200,
+    "ok": true,
+    "body": {
+      "open": 0,
+      "events": {},
+      "error": null
+    },
+    "body_text": "{\"open\":0,\"events\":{},\"error\":null}"
+  },
+  "history": {
+    "url": "https://sb2bethistory-gateway-altenar2.biahosted.com/api/WidgetReports/widgetBetHistory?culture=en-GB&timezoneOffset=0&integration=fanteam&deviceType=1&numFormat=en-GB&countryCode=GB",
+    "status": 405,
+    "ok": false,
+    "body": "",
+    "body_text": ""
+  }
+}

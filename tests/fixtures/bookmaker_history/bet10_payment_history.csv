@@ -1,0 +1,9 @@
+Account summary,Total wins,Total bets,Total deposits,Total withdrawals,Beginning balance,Ending balance
+"09-12-2025 - 09-03-2026","£ 7.45","£ 25.80","£ 50.00","£ 31.65","£ 0.00","£ 0.00"
+
+Player:
+"6BR8844492"
+
+Date and time,Payment type,Amount,Status,Method,Account,Payment ID,Product,Fee
+"04-03-2026 23:52","Withdrawal","£ 31.65","Approved","Trustly","5657311158","6090615942","sportsbook",""
+"02-03-2026 01:25","Deposit","£ 50.00","Approved","Trustly","5657311158","6082665972","sportsbook",""

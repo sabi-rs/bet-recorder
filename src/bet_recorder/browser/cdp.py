@@ -10,7 +10,8 @@ from urllib.request import urlopen
 JsonFetcher = Callable[[str], str]
 
 DEFAULT_DEBUG_BASE_URL = "http://127.0.0.1:9222"
-DEFAULT_EVALUATE_TIMEOUT_SECONDS = 5.0
+DEFAULT_EVALUATE_TIMEOUT_SECONDS = 10.0
+DEFAULT_INTERACTION_WAIT_MS = 1500
 SOURCE_URL_FRAGMENTS = {
   "bet365": "bet365.com",
   "betuk": "betuk.com",
@@ -165,11 +166,88 @@ def evaluate_debug_target_value(
   *,
   websocket_debugger_url: str,
   expression: str,
+  await_promise: bool = False,
+  frame_url_fragments: Sequence[str] | None = None,
 ):
   return asyncio.run(
-    _evaluate_debug_target_value(
+    _evaluate_debug_target_expression(
       websocket_debugger_url=websocket_debugger_url,
       expression=expression,
+      await_promise=await_promise,
+      frame_url_fragments=frame_url_fragments,
+    ),
+  )
+
+
+def fetch_debug_target_json(
+  *,
+  websocket_debugger_url: str,
+  url: str,
+  frame_url_fragments: Sequence[str] | None = None,
+) -> dict:
+  payload = evaluate_debug_target_value(
+    websocket_debugger_url=websocket_debugger_url,
+    expression=f"""
+      (async () => {{
+        const response = await fetch({json.dumps(url)}, {{ credentials: "include" }});
+        const text = await response.text();
+        let body = null;
+        try {{
+          body = JSON.parse(text);
+        }} catch (error) {{
+          body = null;
+        }}
+        return {{
+          url: {json.dumps(url)},
+          status: response.status,
+          ok: response.ok,
+          body,
+          body_text: text,
+        }};
+      }})()
+    """,
+    await_promise=True,
+    frame_url_fragments=frame_url_fragments,
+  )
+  if not isinstance(payload, dict):
+    raise ValueError(f"CDP fetch did not return an object payload for URL: {url}")
+  return {
+    "url": str(payload.get("url", url)),
+    "status": int(payload.get("status", 0) or 0),
+    "ok": bool(payload.get("ok", False)),
+    "body": payload.get("body"),
+    "body_text": str(payload.get("body_text", "") or ""),
+  }
+
+
+def navigate_debug_target(
+  *,
+  websocket_debugger_url: str,
+  url: str,
+  wait_ms: int = DEFAULT_INTERACTION_WAIT_MS,
+) -> None:
+  asyncio.run(
+    _navigate_debug_target(
+      websocket_debugger_url=websocket_debugger_url,
+      url=url,
+      wait_ms=wait_ms,
+    ),
+  )
+
+
+def click_debug_target_by_labels(
+  *,
+  websocket_debugger_url: str,
+  labels: Sequence[str],
+  wait_ms: int = DEFAULT_INTERACTION_WAIT_MS,
+  frame_url_fragments: Sequence[str] | None = None,
+):
+  return asyncio.run(
+    _click_debug_target_by_labels(
+      websocket_debugger_url=websocket_debugger_url,
+      labels=labels,
+      wait_ms=wait_ms,
+      frame_url_fragments=frame_url_fragments,
     ),
   )
 
@@ -180,10 +258,12 @@ def capture_debug_target_page_state(
   page: str,
   captured_at: datetime,
   notes: Sequence[str] | None = None,
+  frame_url_fragments: Sequence[str] | None = None,
 ) -> dict:
   payload = evaluate_debug_target_value(
     websocket_debugger_url=websocket_debugger_url,
     expression=PAGE_STATE_JS,
+    frame_url_fragments=frame_url_fragments,
   )
   if not isinstance(payload, dict):
     raise ValueError("CDP page capture did not return an object payload.")
@@ -266,44 +346,309 @@ async def _capture_transport_events(
     return events
 
 
-async def _evaluate_debug_target_value(
+async def _evaluate_debug_target_expression(
   *,
   websocket_debugger_url: str,
   expression: str,
+  await_promise: bool = False,
+  frame_url_fragments: Sequence[str] | None = None,
 ):
   import websockets
 
   async with websockets.connect(websocket_debugger_url, max_size=None) as websocket:
-    await websocket.send(
-      json.dumps(
-        {
-          "id": 1,
-          "method": "Runtime.evaluate",
-          "params": {
-            "expression": expression,
-            "returnByValue": True,
-          },
-        },
-      ),
+    context_id = None
+    if frame_url_fragments:
+      context_id = await _create_frame_execution_context(
+        websocket=websocket,
+        frame_url_fragments=frame_url_fragments,
+      )
+    await _send_debug_target_command(
+      websocket=websocket,
+      command_id=1,
+      method="Runtime.evaluate",
+      params={
+        "expression": expression,
+        "returnByValue": True,
+        "awaitPromise": await_promise,
+        **({"contextId": context_id} if context_id is not None else {}),
+      },
     )
-    while True:
-      try:
-        raw_message = await asyncio.wait_for(
-          websocket.recv(),
-          timeout=DEFAULT_EVALUATE_TIMEOUT_SECONDS,
-        )
-      except TimeoutError as exc:
-        raise ValueError(
-          f"CDP evaluation timed out after {DEFAULT_EVALUATE_TIMEOUT_SECONDS:.0f}s"
-        ) from exc
-      payload = json.loads(raw_message)
-      if payload.get("id") != 1:
-        continue
-      result = payload.get("result", {}).get("result", {})
-      if "value" in result:
-        return result["value"]
-      description = result.get("description") or payload.get("error") or "unknown"
-      raise ValueError(f"CDP evaluation failed: {description}")
+    return _parse_debug_target_result(
+      await _receive_debug_target_response(websocket=websocket, command_id=1),
+    )
+
+
+async def _navigate_debug_target(
+  *,
+  websocket_debugger_url: str,
+  url: str,
+  wait_ms: int,
+) -> None:
+  import websockets
+
+  async with websockets.connect(websocket_debugger_url, max_size=None) as websocket:
+    await _send_debug_target_command(
+      websocket=websocket,
+      command_id=1,
+      method="Page.enable",
+    )
+    await _receive_debug_target_response(websocket=websocket, command_id=1)
+    await _send_debug_target_command(
+      websocket=websocket,
+      command_id=2,
+      method="Page.navigate",
+      params={"url": url},
+    )
+    await _receive_debug_target_response(websocket=websocket, command_id=2)
+    await asyncio.sleep(max(wait_ms, 0) / 1000)
+
+
+async def _click_debug_target_by_labels(
+  *,
+  websocket_debugger_url: str,
+  labels: Sequence[str],
+  wait_ms: int,
+  frame_url_fragments: Sequence[str] | None = None,
+):
+  effective_labels = [str(label).strip() for label in labels if str(label).strip()]
+  if not effective_labels:
+    raise ValueError("Cannot click a debug target action without labels.")
+
+  expression = _build_click_labels_expression(labels=effective_labels)
+  payload = await _evaluate_debug_target_expression(
+    websocket_debugger_url=websocket_debugger_url,
+    expression=expression,
+    frame_url_fragments=frame_url_fragments,
+  )
+  if not isinstance(payload, dict) or not payload.get("clicked"):
+    raise ValueError(
+      "CDP click failed to find an interactive element for labels: "
+      + ", ".join(effective_labels)
+    )
+  await asyncio.sleep(max(wait_ms, 0) / 1000)
+  return payload
+
+
+async def _send_debug_target_command(
+  *,
+  websocket,
+  command_id: int,
+  method: str,
+  params: dict | None = None,
+) -> None:
+  await websocket.send(
+    json.dumps(
+      {
+        "id": command_id,
+        "method": method,
+        "params": params or {},
+      },
+    ),
+  )
+
+
+async def _create_frame_execution_context(
+  *,
+  websocket,
+  frame_url_fragments: Sequence[str],
+) -> int:
+  lowered_fragments = [fragment.lower() for fragment in frame_url_fragments if fragment]
+  if not lowered_fragments:
+    raise ValueError("Cannot select a frame without URL fragments.")
+
+  await _send_debug_target_command(
+    websocket=websocket,
+    command_id=90,
+    method="Page.enable",
+  )
+  await _receive_debug_target_response(websocket=websocket, command_id=90)
+  frame_id = None
+  for _ in range(10):
+    await _send_debug_target_command(
+      websocket=websocket,
+      command_id=91,
+      method="Page.getFrameTree",
+    )
+    response = await _receive_debug_target_response(websocket=websocket, command_id=91)
+    try:
+      frame_id = _select_frame_id_by_fragments(
+        frame_tree=response.get("result", {}).get("frameTree", {}),
+        url_fragments=lowered_fragments,
+      )
+      break
+    except ValueError:
+      await asyncio.sleep(0.5)
+  if frame_id is None:
+    raise ValueError(
+      "Could not find a CDP frame matching any fragment: "
+      + ", ".join(frame_url_fragments)
+    )
+  await _send_debug_target_command(
+    websocket=websocket,
+    command_id=92,
+    method="Page.createIsolatedWorld",
+    params={
+      "frameId": frame_id,
+      "worldName": "codex-history",
+      "grantUniveralAccess": True,
+    },
+  )
+  context_id = (
+    await _receive_debug_target_response(websocket=websocket, command_id=92)
+  ).get("result", {}).get("executionContextId")
+  if not isinstance(context_id, int):
+    raise ValueError(
+      "CDP failed to create an execution context for frame fragments: "
+      + ", ".join(frame_url_fragments)
+    )
+  return context_id
+
+
+def _select_frame_id_by_fragments(
+  *,
+  frame_tree: dict,
+  url_fragments: Sequence[str],
+) -> str:
+  for frame in _iter_frame_nodes(frame_tree):
+    haystack = " ".join(
+      str(frame.get(key, "") or "")
+      for key in ("url", "urlFragment", "unreachableUrl", "name")
+    ).lower()
+    if any(fragment in haystack for fragment in url_fragments):
+      frame_id = str(frame.get("id", "") or "")
+      if frame_id:
+        return frame_id
+  raise ValueError(
+    "Could not find a CDP frame matching any fragment: "
+    + ", ".join(url_fragments)
+  )
+
+
+def _iter_frame_nodes(frame_tree: dict):
+  frame = frame_tree.get("frame")
+  if isinstance(frame, dict):
+    yield frame
+  for child in frame_tree.get("childFrames", []) or []:
+    if isinstance(child, dict):
+      yield from _iter_frame_nodes(child)
+
+
+async def _receive_debug_target_response(
+  *,
+  websocket,
+  command_id: int,
+) -> dict:
+  while True:
+    try:
+      raw_message = await asyncio.wait_for(
+        websocket.recv(),
+        timeout=DEFAULT_EVALUATE_TIMEOUT_SECONDS,
+      )
+    except TimeoutError as exc:
+      raise ValueError(
+        f"CDP evaluation timed out after {DEFAULT_EVALUATE_TIMEOUT_SECONDS:.0f}s"
+      ) from exc
+    payload = json.loads(raw_message)
+    if payload.get("id") != command_id:
+      continue
+    if "error" in payload:
+      message = payload["error"].get("message") or "unknown"
+      raise ValueError(f"CDP command failed: {message}")
+    return payload
+
+
+def _parse_debug_target_result(payload: dict):
+  result = payload.get("result", {}).get("result", {})
+  if "value" in result:
+    return result["value"]
+  description = result.get("description") or payload.get("error") or "unknown"
+  raise ValueError(f"CDP evaluation failed: {description}")
+
+
+def _build_click_labels_expression(*, labels: Sequence[str]) -> str:
+  return """
+(() => {
+  const wanted = %s.map((label) => label.toLowerCase());
+  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim().toLowerCase();
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const labelFor = (element) => normalize(
+    element.getAttribute("aria-label")
+    || element.innerText
+    || element.textContent
+    || element.getAttribute("title")
+    || element.getAttribute("name")
+    || ""
+  );
+  const candidates = Array.from(
+    document.body ? document.body.querySelectorAll("*") : []
+  );
+  for (const wantedLabel of wanted) {
+    const matches = candidates
+      .filter((candidate) => isVisible(candidate))
+      .map((candidate) => ({
+        candidate,
+        label: labelFor(candidate),
+      }))
+      .filter(({ candidate, label }) => {
+        if (!label) {
+          return false;
+        }
+        if (!(label === wantedLabel || label.includes(wantedLabel) || wantedLabel.includes(label))) {
+          return false;
+        }
+        if (label.length > Math.max((wantedLabel.length * 3), wantedLabel.length + 24)) {
+          return false;
+        }
+        return !Array.from(candidate.children).some((child) => labelFor(child) === label);
+      })
+      .sort((left, right) => left.label.length - right.label.length);
+    const match = matches.find(({ candidate }) => {
+      const target = candidate.closest("a, button, [role='button'], summary, [aria-controls]") || candidate;
+      return isVisible(target);
+    });
+    if (!match) {
+      continue;
+    }
+    const element = match.candidate;
+    const target = element.closest("a, button, [role='button'], summary, [aria-controls]") || element;
+    if (!target) {
+      continue;
+    }
+    const label = labelFor(element) || labelFor(target);
+    if (!label) {
+      continue;
+    }
+    const clickable = target;
+    const nativeClick = clickable instanceof HTMLElement ? clickable : element;
+    const targetLabel = labelFor(clickable) || label;
+    const eventTarget = nativeClick instanceof HTMLElement ? nativeClick : element;
+    const targetToClick = eventTarget || clickable;
+    if (!(targetToClick instanceof Element)) {
+      continue;
+    }
+    targetToClick.scrollIntoView({ block: "center", inline: "center" });
+    const pointerEvents = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
+    for (const type of pointerEvents) {
+      targetToClick.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    if (targetToClick instanceof HTMLElement) {
+      targetToClick.click();
+    }
+    return { clicked: targetLabel };
+  }
+  return { clicked: null };
+})()
+""" % json.dumps(list(labels))
 
 
 def _fetch_text(url: str) -> str:

@@ -1,0 +1,4 @@
+"currency","id","time","transaction-type","product","detail","debit","credit","balance","third-party-transaction-id"
+GBP,32706738456501028,2026-03-09T02:44:16.003Z,"Manual","Account","Withdrawal via card",-13.55000,0.00000,0.00203,""
+GBP,32706737048701012,2026-03-09T02:44:04.311Z,"Manual","Account","Deposit via card",0.00000,10.00000,13.55203,""
+GBP,32698044763900018,2026-03-08T02:35:19.069Z,"Payout","Exchange","Columbus Crew vs Chicago Fire | Match Odds",-21.44797,0.00000,3.55203,""

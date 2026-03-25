@@ -68,6 +68,92 @@ BET600_PROFILE = GenericSportsbookProfile(
   login_phrases=("log in", "login", "sign in"),
   no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
 )
+BETANO_PROFILE = GenericSportsbookProfile(
+  venue="betano",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+BETMGM_PROFILE = GenericSportsbookProfile(
+  venue="betmgm",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+BETVICTOR_PROFILE = GenericSportsbookProfile(
+  venue="betvictor",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+SKYBET_PROFILE = GenericSportsbookProfile(
+  venue="skybet",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+TALKSPORTBET_PROFILE = GenericSportsbookProfile(
+  venue="talksportbet",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+PADDYPOWER_PROFILE = GenericSportsbookProfile(
+  venue="paddypower",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+BOYLESPORTS_PROFILE = GenericSportsbookProfile(
+  venue="boylesports",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+WILLIAMHILL_PROFILE = GenericSportsbookProfile(
+  venue="williamhill",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+SPORTINGINDEX_PROFILE = GenericSportsbookProfile(
+  venue="sportingindex",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+LEOVEGAS_PROFILE = GenericSportsbookProfile(
+  venue="leovegas",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+FANTEAM_PROFILE = GenericSportsbookProfile(
+  venue="fanteam",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+MIDNITE_PROFILE = GenericSportsbookProfile(
+  venue="midnite",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+BET10_PROFILE = GenericSportsbookProfile(
+  venue="bet10",
+  login_phrases=("log in", "login", "sign in"),
+  no_open_bets_phrases=("you have no bets", "no open bets", "my bets is empty"),
+)
+
+GENERIC_SPORTSBOOK_PROFILES = {
+  BETFRED_PROFILE.venue: BETFRED_PROFILE,
+  CORAL_PROFILE.venue: CORAL_PROFILE,
+  LADBROKES_PROFILE.venue: LADBROKES_PROFILE,
+  KWIK_PROFILE.venue: KWIK_PROFILE,
+  BET600_PROFILE.venue: BET600_PROFILE,
+  BETANO_PROFILE.venue: BETANO_PROFILE,
+  BETMGM_PROFILE.venue: BETMGM_PROFILE,
+  BETVICTOR_PROFILE.venue: BETVICTOR_PROFILE,
+  SKYBET_PROFILE.venue: SKYBET_PROFILE,
+  TALKSPORTBET_PROFILE.venue: TALKSPORTBET_PROFILE,
+  PADDYPOWER_PROFILE.venue: PADDYPOWER_PROFILE,
+  BOYLESPORTS_PROFILE.venue: BOYLESPORTS_PROFILE,
+  WILLIAMHILL_PROFILE.venue: WILLIAMHILL_PROFILE,
+  SPORTINGINDEX_PROFILE.venue: SPORTINGINDEX_PROFILE,
+  LEOVEGAS_PROFILE.venue: LEOVEGAS_PROFILE,
+  FANTEAM_PROFILE.venue: FANTEAM_PROFILE,
+  MIDNITE_PROFILE.venue: MIDNITE_PROFILE,
+  BET10_PROFILE.venue: BET10_PROFILE,
+}
 
 
 def analyze_betfred_page(
@@ -142,6 +228,233 @@ def analyze_bet600_page(
     body_text=body_text,
     visible_actions=visible_actions,
     profile=BET600_PROFILE,
+  )
+
+
+def analyze_betano_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="betano",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_betmgm_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="betmgm",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_betvictor_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="betvictor",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_skybet_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="skybet",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_talksportbet_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="talksportbet",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_paddypower_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="paddypower",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_boylesports_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="boylesports",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_williamhill_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="williamhill",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_sportingindex_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="sportingindex",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_leovegas_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="leovegas",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_fanteam_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="fanteam",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_midnite_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="midnite",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_bet10_page(
+  *,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  return analyze_generic_named_sportsbook_page(
+    venue="bet10",
+    page=page,
+    body_text=body_text,
+    inputs=inputs,
+    visible_actions=visible_actions,
+  )
+
+
+def analyze_generic_named_sportsbook_page(
+  *,
+  venue: str,
+  page: str,
+  body_text: str,
+  inputs: dict[str, str],
+  visible_actions: list[str],
+) -> dict:
+  profile = GENERIC_SPORTSBOOK_PROFILES.get(venue)
+  if profile is None:
+    raise ValueError(f"Unsupported generic sportsbook venue: {venue}")
+  return analyze_generic_sportsbook_page(
+    page=page,
+    body_text=body_text,
+    visible_actions=visible_actions,
+    profile=profile,
   )
 
 

@@ -1,0 +1,111 @@
+{
+  "groups": [
+    {
+      "date": "2026-03-01",
+      "bets": [
+        {
+          "id": "d5ad06ed-d4a3-4e1d-a4cc-2190d5593a17",
+          "betReference": "10000011879993",
+          "createdDate": "2026-03-19T18:11:44Z",
+          "settledDate": "2026-03-19T21:55:21Z",
+          "pendingPayout": false,
+          "betType": "Draw",
+          "stake": 5.0,
+          "returns": 13.0,
+          "grossReturns": 13.0,
+          "normalReturns": 13.0,
+          "grossNormalReturns": 13.0,
+          "enhancedReturns": 0,
+          "grossEnhancedReturns": 0,
+          "bonusFunds": true,
+          "odds": "3.6",
+          "result": "won",
+          "fractionalOdds": "13/5",
+          "description": "Bonus Funds: GBP 5.00 Single: DRAW @ 13/5 [Match Betting - 90 Mins] - Roma v Bologna - UEFA Europa League - FOOTBALL",
+          "taxDeductVal": 0.0,
+          "summary": {
+            "result": "WON",
+            "odds": "13/5",
+            "decimalOdds": 3.6,
+            "taxDeductionValue": 0,
+            "bogExtraMoney": null,
+            "fullCashedOut": false,
+            "cashOutCredit": null,
+            "name": "Draw",
+            "bog": false
+          },
+          "cashOut": false,
+          "sportId": 100
+        },
+        {
+          "id": "1426d5e2-514f-4285-b75b-c9100dd5eed0",
+          "betReference": "10000011119300",
+          "createdDate": "2026-03-18T12:35:58Z",
+          "settledDate": "2026-03-18T21:54:16Z",
+          "pendingPayout": false,
+          "betType": "Tottenham Hotspur",
+          "stake": 10.0,
+          "returns": 23.75,
+          "grossReturns": 23.75,
+          "normalReturns": 23.75,
+          "grossNormalReturns": 23.75,
+          "enhancedReturns": 0,
+          "grossEnhancedReturns": 0,
+          "bonusFunds": false,
+          "odds": "2.375",
+          "result": "won",
+          "fractionalOdds": "11/8",
+          "description": "GBP 10.00 Single: TOTTENHAM HOTSPUR @ 11/8 [Match Betting - 90 Mins] - Tottenham Hotspur v Atletico Madrid - UEFA Champions League - FOOTBALL",
+          "taxDeductVal": 0.0,
+          "summary": {
+            "result": "WON",
+            "odds": "11/8",
+            "decimalOdds": 2.375,
+            "taxDeductionValue": 0,
+            "bogExtraMoney": null,
+            "fullCashedOut": false,
+            "cashOutCredit": null,
+            "name": "Tottenham Hotspur",
+            "bog": false
+          },
+          "cashOut": false,
+          "sportId": 100
+        },
+        {
+          "id": "aca2b5fc-3816-45d6-bc83-8bc808c9e9e8",
+          "betReference": "10000011892265",
+          "createdDate": "2026-03-19T18:47:28Z",
+          "settledDate": "2026-03-19T19:38:50Z",
+          "pendingPayout": false,
+          "betType": "Double",
+          "stake": 10.0,
+          "returns": 12.4,
+          "grossReturns": 12.4,
+          "normalReturns": 12.4,
+          "grossNormalReturns": 12.4,
+          "enhancedReturns": 0,
+          "grossEnhancedReturns": 0,
+          "bonusFunds": true,
+          "odds": "2.24",
+          "result": "won",
+          "fractionalOdds": "1.24/1",
+          "description": "Bonus Funds: GBP 10.00 Double: FSV MAINZ @ 3/5 [Match Betting - IR 90 Mins] - FSV Mainz v SK Sigma Olomouc - UEFA Conference League - FOOTBALL; NK CELJE @ 2/5 [Match Betting - IR 90 Mins] - AEK Athens v NK Celje - UEFA Conference League - FOOTBALL",
+          "taxDeductVal": 0.0,
+          "summary": {
+            "result": "WON",
+            "odds": "1.24/1",
+            "decimalOdds": 2.24,
+            "taxDeductionValue": 0,
+            "bogExtraMoney": null,
+            "fullCashedOut": false,
+            "cashOutCredit": null,
+            "name": "Double",
+            "bog": false
+          },
+          "cashOut": false
+        }
+      ]
+    }
+  ],
+  "load_more": false
+}

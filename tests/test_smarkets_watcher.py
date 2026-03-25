@@ -98,6 +98,116 @@ def test_run_smarkets_watcher_captures_and_writes_latest_state(
     assert (run_dir / "screenshots").is_dir()
 
 
+def test_run_smarkets_watcher_syncs_bookmaker_history_in_background(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    sync_calls: list[Path] = []
+
+    def fake_capture(config: WatcherConfig, captured_at: datetime) -> dict:
+        return {
+            "captured_at": captured_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": "smarkets_exchange",
+            "kind": "positions_snapshot",
+            "page": "open_positions",
+            "url": "https://smarkets.com/open-positions",
+            "document_title": "Open positions",
+            "body_text": (
+                "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
+                "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open "
+                "Lazio vs Sassuolo "
+                "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£1.31 (3.13%) Order filled Trade out"
+            ),
+            "interactive_snapshot": [],
+            "links": [],
+            "inputs": {},
+            "visible_actions": ["Trade out"],
+            "resource_hosts": ["smarkets.com"],
+            "local_storage_keys": [],
+            "screenshot_path": None,
+            "notes": ["watcher-loop"],
+        }
+
+    monkeypatch.setattr(
+        "bet_recorder.watcher.sync_live_bookmaker_history_for_run_dir",
+        lambda current_run_dir: sync_calls.append(current_run_dir),
+    )
+
+    run_smarkets_watcher(
+        WatcherConfig(
+            run_dir=run_dir,
+            session="helium-copy",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+        capture_once=fake_capture,
+        sleep=lambda _: None,
+        now=lambda: datetime(2026, 3, 11, 12, 5, tzinfo=UTC),
+        max_iterations=1,
+    )
+
+    assert sync_calls == [run_dir]
+
+
+def test_run_smarkets_watcher_records_bookmaker_history_sync_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+
+    def fake_capture(config: WatcherConfig, captured_at: datetime) -> dict:
+        return {
+            "captured_at": captured_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": "smarkets_exchange",
+            "kind": "positions_snapshot",
+            "page": "open_positions",
+            "url": "https://smarkets.com/open-positions",
+            "document_title": "Open positions",
+            "body_text": (
+                "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
+                "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open "
+                "Lazio vs Sassuolo "
+                "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£1.31 (3.13%) Order filled Trade out"
+            ),
+            "interactive_snapshot": [],
+            "links": [],
+            "inputs": {},
+            "visible_actions": ["Trade out"],
+            "resource_hosts": ["smarkets.com"],
+            "local_storage_keys": [],
+            "screenshot_path": None,
+            "notes": ["watcher-loop"],
+        }
+
+    def failing_sync(_: Path) -> list[dict]:
+        raise RuntimeError("history timeout")
+
+    monkeypatch.setattr(
+        "bet_recorder.watcher.sync_live_bookmaker_history_for_run_dir",
+        failing_sync,
+    )
+
+    state = run_smarkets_watcher(
+        WatcherConfig(
+            run_dir=run_dir,
+            session="helium-copy",
+            interval_seconds=5.0,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+        ),
+        capture_once=fake_capture,
+        sleep=lambda _: None,
+        now=lambda: datetime(2026, 3, 11, 12, 5, tzinfo=UTC),
+        max_iterations=1,
+    )
+
+    assert "bookmaker history sync failed: history timeout" in state["warnings"]
+
+
 def test_build_exchange_snapshot_from_payload_surfaces_capture_warnings() -> None:
     payload = {
         "captured_at": "2026-03-11T12:05:00Z",

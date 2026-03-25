@@ -10,6 +10,7 @@ from bet_recorder.ledger.expected_value import (
 from bet_recorder.ledger.models import BetActivity, TrackedBet, TrackedLeg, ValueMetric
 from bet_recorder.ledger.taxonomy import (
     infer_bet_type,
+    infer_funding_kind,
     infer_exchange,
     infer_market_family,
     infer_platform_kind,
@@ -24,6 +25,10 @@ def load_tracked_bets(path: Path | None) -> list[dict]:
         return []
 
     payload = json.loads(path.read_text())
+    return load_tracked_bets_payload(payload)
+
+
+def load_tracked_bets_payload(payload: dict) -> list[dict]:
     tracked_bets = payload.get("tracked_bets")
     if not isinstance(tracked_bets, list):
         raise ValueError("Companion legs payload must contain a tracked_bets list.")
@@ -87,6 +92,12 @@ def _normalize_tracked_bet_payload(tracked_bet: dict) -> dict:
                 explicit_market_family=tracked_bet.get("market_family"),
                 market=market,
             )
+        ),
+        funding_kind=infer_funding_kind(
+            explicit_funding_kind=tracked_bet.get("funding_kind"),
+            notes=tracked_bet.get("notes"),
+            bet_type=tracked_bet.get("bet_type"),
+            status=tracked_bet.get("status"),
         ),
         selection_line=selection_line,
         currency=str(tracked_bet.get("currency", "GBP")),

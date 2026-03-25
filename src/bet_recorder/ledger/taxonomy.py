@@ -7,13 +7,35 @@ EXCHANGE_VENUES = {"smarkets", "betfair_exchange", "betfair", "matchbook", "betd
 def normalize_vendor(value: object) -> str:
     normalized = str(value or "").strip().lower().replace(" ", "_")
     aliases = {
+        "10bet": "bet10",
         "betfair_exchange": "betfair_exchange",
         "betfair": "betfair",
+        "betano": "betano",
         "betmgm": "betmgm",
         "bet_mgm": "betmgm",
+        "betvictor": "betvictor",
+        "bet_victor": "betvictor",
         "bet365": "bet365",
+        "bet10": "bet10",
+        "boylesports": "boylesports",
+        "boyle_sports": "boylesports",
+        "fanteam": "fanteam",
+        "fan_team": "fanteam",
+        "leovegas": "leovegas",
+        "leo_vegas": "leovegas",
+        "midnite": "midnite",
+        "paddypower": "paddypower",
+        "paddy_power": "paddypower",
+        "skybet": "skybet",
+        "sky_bet": "skybet",
         "smarkets": "smarkets",
+        "sportingindex": "sportingindex",
+        "sporting_index": "sportingindex",
+        "talksportbet": "talksportbet",
+        "talksport_bet": "talksportbet",
         "matchbook": "matchbook",
+        "williamhill": "williamhill",
+        "william_hill": "williamhill",
         "betdaq": "betdaq",
     }
     return aliases.get(normalized, normalized)
@@ -90,3 +112,68 @@ def infer_spread(*, explicit_spread: object, selection_line: object, legs: list[
         if line not in (None, ""):
             return float(line)
     return None
+
+
+def normalize_funding_kind(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "cash": "cash",
+        "standard": "cash",
+        "normal": "cash",
+        "qualifying": "cash",
+        "freebet": "free_bet",
+        "free_bet": "free_bet",
+        "snr": "free_bet",
+        "stake_returned": "free_bet",
+        "stake_not_returned": "free_bet",
+        "risk_free": "risk_free",
+        "refund": "risk_free",
+        "bonus": "bonus",
+        "promo": "bonus",
+        "promotion": "bonus",
+        "boost": "bonus",
+        "unknown": "unknown",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def infer_funding_kind(
+    *,
+    explicit_funding_kind: object,
+    notes: object = None,
+    bet_type: object = None,
+    status: object = None,
+    free_bet: object = None,
+) -> str:
+    normalized_explicit = normalize_funding_kind(explicit_funding_kind)
+    if normalized_explicit and normalized_explicit != "unknown":
+        return normalized_explicit
+
+    if bool(free_bet):
+        return "free_bet"
+
+    haystack = " ".join(
+        str(candidate or "").strip().lower()
+        for candidate in (notes, bet_type, status)
+        if str(candidate or "").strip()
+    )
+    if not haystack:
+        return "unknown"
+
+    if any(keyword in haystack for keyword in ("free bet", "freebet", "snr", "stake returned")):
+        return "free_bet"
+    if any(keyword in haystack for keyword in ("risk free", "refund")):
+        return "risk_free"
+    if any(keyword in haystack for keyword in ("bonus", "promo", "promotion", "boost")):
+        return "bonus"
+    if any(keyword in haystack for keyword in ("qualifying", "cash", "normal")):
+        return "cash"
+    return "unknown"
+
+
+def funding_kind_is_promo(value: object) -> bool:
+    return normalize_funding_kind(value) in {"free_bet", "risk_free", "bonus"}
+
+
+def funding_kind_is_cash(value: object) -> bool:
+    return normalize_funding_kind(value) == "cash"

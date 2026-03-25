@@ -178,6 +178,12 @@ def _event_summary(event: dict) -> str:
         if reference_id:
             return f"{action} {reference_id} -> {status}"
         return f"{action} -> {status}"
+    if kind == "bookmaker_history_sync":
+        action = str(event.get("action", "") or "history")
+        status = str(event.get("status", "") or "unknown")
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        rows_extracted = int(metadata.get("rows_extracted", 0) or 0)
+        return f"{action} history sync -> {status} ({rows_extracted} row(s))"
     if kind:
         return f"Captured {source} {page} ({kind})."
     return "Recorded bundle event."

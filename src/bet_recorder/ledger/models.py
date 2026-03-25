@@ -88,6 +88,7 @@ class LedgerEntry:
     side: str = ""
     bet_type: str = ""
     market_family: str = ""
+    funding_kind: str = ""
     sport_name: str = ""
     currency: str = "GBP"
     amount_gbp: float | None = None
@@ -118,6 +119,7 @@ class LedgerEntry:
             "side": self.side,
             "bet_type": self.bet_type,
             "market_family": self.market_family,
+            "funding_kind": self.funding_kind,
             "sport_name": self.sport_name,
             "currency": self.currency,
             "amount_gbp": self.amount_gbp,
@@ -189,6 +191,7 @@ class TrackedBet:
     sport_name: str = ""
     bet_type: str = ""
     market_family: str = ""
+    funding_kind: str = ""
     selection_line: float | None = None
     currency: str = "GBP"
     stake_gbp: float | None = None
@@ -222,6 +225,7 @@ class TrackedBet:
             "sport_name": self.sport_name,
             "bet_type": self.bet_type,
             "market_family": self.market_family,
+            "funding_kind": self.funding_kind,
             "selection_line": self.selection_line,
             "currency": self.currency,
             "stake_gbp": self.stake_gbp,

@@ -8,7 +8,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bet_recorder.cli import app  # noqa: E402
 from bet_recorder.ledger import history_import  # noqa: E402
-from bet_recorder.ledger.history_import import Bet10Receipt, import_statement_history  # noqa: E402
+from bet_recorder.ledger.history_import import (  # noqa: E402
+    Bet10Receipt,
+    import_statement_history,
+    parse_betfair_account_statement_csv,
+    parse_matchbook_transactions_csv,
+)
+
+
+def history_fixture_path(name: str) -> Path:
+    return Path(__file__).resolve().parent / "fixtures" / "bookmaker_history" / name
 
 
 def test_import_statement_history_normalizes_bank_betfair_and_matchbook_rows(
@@ -165,6 +174,55 @@ def test_import_statement_history_normalizes_bank_betfair_and_matchbook_rows(
     assert pending_entry["activity_type"] == "pending_withdrawal"
     assert pending_entry["status"] == "pending"
     assert pending_entry["amount_gbp"] == 200.0
+
+
+def test_parse_betfair_account_statement_fixture_reads_exchange_and_sportsbook_rows() -> None:
+    entries, account_activities = parse_betfair_account_statement_csv(
+        history_fixture_path("betfair_account_statement.csv")
+    )
+
+    assert len(entries) >= 5
+    exchange_entry = next(
+        entry for entry in entries if entry["activity_type"] == "exchange_settlement"
+    )
+    assert exchange_entry["platform"] == "betfair"
+    assert exchange_entry["platform_kind"] == "exchange"
+    assert exchange_entry["exchange"] == "betfair_exchange"
+    assert exchange_entry["event"] == "Wolves v Liverpool"
+    assert exchange_entry["market"] == "Match Odds"
+
+    sportsbook_entry = next(
+        entry
+        for entry in entries
+        if entry["activity_type"] == "bet_placed"
+        and entry["platform_kind"] == "sportsbook"
+    )
+    assert sportsbook_entry["platform"] == "betfair"
+    assert sportsbook_entry["source_kind"] == "betfair_account_statement"
+    assert len(account_activities) >= 2
+
+
+def test_parse_matchbook_transactions_fixture_reads_exchange_and_account_rows() -> None:
+    entries, account_activities = parse_matchbook_transactions_csv(
+        history_fixture_path("matchbook_transactions.csv")
+    )
+
+    assert len(entries) >= 3
+    exchange_entry = next(
+        entry for entry in entries if entry["activity_type"] == "bet_settled"
+    )
+    assert exchange_entry["platform"] == "matchbook"
+    assert exchange_entry["platform_kind"] == "exchange"
+    assert exchange_entry["exchange"] == "matchbook"
+    assert exchange_entry["event"] == "Columbus Crew vs Chicago Fire"
+    assert exchange_entry["market"] == "Match Odds"
+
+    account_entry = next(
+        entry for entry in entries if entry["activity_type"] == "deposit"
+    )
+    assert account_entry["platform"] == "matchbook"
+    assert account_entry["source_kind"] == "matchbook_transactions"
+    assert len(account_activities) >= 2
 
 
 def test_import_ledger_history_command_writes_json_payload(tmp_path: Path) -> None:

@@ -15,9 +15,20 @@ from bet_recorder.analysis.smarkets_exchange import analyze_smarkets_page
 from bet_recorder.browser.agent_browser import AgentBrowserClient
 from bet_recorder.browser.cdp import (
     capture_debug_target_page_state,
+    click_debug_target_by_labels,
     list_debug_targets,
+    navigate_debug_target,
     select_debug_target_by_fragments,
 )
+from bet_recorder.bookmaker_history_runtime import (
+    extract_live_bookmaker_ledger_entries,
+    load_runtime_bookmaker_history_entries,
+    load_runtime_bookmaker_history_payload,
+    merge_runtime_bookmaker_history_entries,
+    runtime_bookmaker_history_path,
+    write_runtime_bookmaker_history_entries,
+)
+from bet_recorder.capture.bookmaker_history_sync import append_bookmaker_history_sync_event
 from bet_recorder.exchange_worker_evidence import (
     build_recorder_bundle_summary,
     build_transport_marker_summary,
@@ -27,14 +38,37 @@ from bet_recorder.exchange_worker_evidence import (
 from bet_recorder.exchange_worker_live import (
     LIVE_VENUE_DEFINITIONS,
     LIVE_VENUE_ORDER,
+    capture_live_venue_history_sync_report,
     live_venue_status_line,
 )
 from bet_recorder.exchange_worker_runtime import (
     build_runtime_summary,
     load_decisions,
 )
-from bet_recorder.ledger.loader import load_tracked_bets
+from bet_recorder.ledger.loader import load_tracked_bets, load_tracked_bets_payload
 from bet_recorder.ledger.policy import build_exit_recommendations
+from bet_recorder.ledger.tracked_bets_backfill import (
+    build_backfilled_tracked_bets,
+    load_statement_history_payload,
+)
+from bet_recorder.ledger.taxonomy import (
+    funding_kind_is_cash,
+    funding_kind_is_promo,
+    infer_funding_kind,
+    infer_market_family,
+    normalize_funding_kind,
+)
+from bet_recorder.tracked_bets_runtime import (
+    auto_tracked_bets_path,
+    event_matches,
+    load_runtime_tracked_bets,
+    market_matches,
+    normalize_market,
+    normalize_key,
+    reconcile_runtime_tracked_bets,
+    text_matches,
+    write_runtime_tracked_bets,
+)
 from bet_recorder.worker_protocol import (
     WorkerConfig,
     build_worker_request_error_response,
@@ -46,6 +80,8 @@ from bet_recorder.worker_protocol import (
 DEFAULT_LEDGER_HISTORY_PATH = (
     Path.home() / "Documents" / "Bets" / "output" / "ledger" / "statement-history.json"
 )
+BOOKMAKER_HISTORY_SYNC_INTERVAL_SECONDS = 300
+BOOKMAKER_HISTORY_SYNC_BATCH_SIZE = 1
 HISTORICAL_POSITION_ACTIVITY_TYPES = {
     "bet_settled",
     "exchange_settlement",
@@ -60,6 +96,10 @@ def _sync_live_module_test_seams() -> None:
     exchange_worker_live_module.capture_debug_target_page_state = (
         capture_debug_target_page_state
     )
+    exchange_worker_live_module.navigate_debug_target = navigate_debug_target
+    exchange_worker_live_module.click_debug_target_by_labels = (
+        click_debug_target_by_labels
+    )
     exchange_worker_live_module.select_debug_target_by_fragments = (
         select_debug_target_by_fragments
     )
@@ -69,6 +109,11 @@ def _sync_live_module_test_seams() -> None:
 def capture_current_live_venue_payload(venue: str) -> dict:
     _sync_live_module_test_seams()
     return exchange_worker_live_module.capture_current_live_venue_payload(venue)
+
+
+def capture_live_venue_history_payload(venue: str) -> dict:
+    _sync_live_module_test_seams()
+    return exchange_worker_live_module.capture_live_venue_history_payload(venue)
 
 
 def analyze_live_venue_payload(venue: str, payload: dict) -> dict:
@@ -90,6 +135,526 @@ def build_live_venue_summaries(
 def capture_live_horse_market_snapshot(query: dict) -> dict:
     _sync_live_module_test_seams()
     return exchange_worker_live_module.capture_live_horse_market_snapshot(query)
+
+
+def _load_existing_tracked_bets(config: WorkerConfig) -> list[dict]:
+    if config.companion_legs_path is not None:
+        return load_tracked_bets(config.companion_legs_path)
+
+    tracked_bets: list[dict] = []
+    tracked_bets_path = auto_tracked_bets_path(config.run_dir)
+    if tracked_bets_path is not None and tracked_bets_path.exists():
+        tracked_bets = load_tracked_bets(tracked_bets_path)
+    return _merge_existing_and_backfilled_tracked_bets(config, tracked_bets)
+
+
+def _load_cached_other_open_bets(cached_snapshot: dict | None) -> list[dict]:
+    if not isinstance(cached_snapshot, dict):
+        return []
+    rows = cached_snapshot.get("other_open_bets")
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _sync_tracked_bets_for_snapshot(
+    *,
+    config: WorkerConfig,
+    open_positions: list[dict],
+    other_open_bets: list[dict],
+    historical_positions: list[dict],
+    captured_at: str,
+    commission_rate: float,
+) -> list[dict]:
+    if config.companion_legs_path is not None:
+        return load_tracked_bets(config.companion_legs_path)
+
+    tracked_bets_path = auto_tracked_bets_path(config.run_dir)
+    if tracked_bets_path is None:
+        return _load_existing_tracked_bets(config)
+
+    existing_tracked_bets = load_runtime_tracked_bets(tracked_bets_path)
+    reconciled_tracked_bets = reconcile_runtime_tracked_bets(
+        existing_tracked_bets=existing_tracked_bets,
+        open_positions=open_positions,
+        other_open_bets=other_open_bets,
+        historical_positions=historical_positions,
+        captured_at=captured_at,
+        commission_rate=commission_rate,
+    )
+    if reconciled_tracked_bets or tracked_bets_path.exists():
+        write_runtime_tracked_bets(
+            tracked_bets_path,
+            reconciled_tracked_bets,
+            updated_at=captured_at or datetime.now(UTC).isoformat(),
+        )
+    return _load_existing_tracked_bets(config)
+
+
+def _merge_existing_and_backfilled_tracked_bets(
+    config: WorkerConfig,
+    existing_tracked_bets: list[dict],
+) -> list[dict]:
+    merged = [deepcopy(tracked_bet) for tracked_bet in existing_tracked_bets]
+    for backfilled_tracked_bet in _load_auto_backfilled_tracked_bets(config):
+        existing_index = _find_matching_tracked_bet_index(
+            merged,
+            candidate=backfilled_tracked_bet,
+        )
+        if existing_index is None:
+            merged.append(backfilled_tracked_bet)
+            continue
+        merged[existing_index] = _merge_tracked_bet_rows(
+            existing=merged[existing_index],
+            incoming=backfilled_tracked_bet,
+        )
+    merged.sort(
+        key=lambda tracked_bet: (
+            _tracked_bet_sort_rank(tracked_bet),
+            str(tracked_bet.get("placed_at", "") or ""),
+            str(tracked_bet.get("bet_id", "") or ""),
+        )
+    )
+    return merged
+
+
+def _load_auto_backfilled_tracked_bets(config: WorkerConfig) -> list[dict]:
+    payload = _load_combined_statement_history_payload(config.run_dir)
+    entries = payload.get("ledger_entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return []
+    backfilled_payload = build_backfilled_tracked_bets(payload)
+    if not backfilled_payload.get("tracked_bets"):
+        return []
+    return load_tracked_bets_payload(backfilled_payload)
+
+
+def _load_combined_statement_history_payload(run_dir: Path | None) -> dict:
+    ledger_entries: list[dict] = []
+    seen_entry_ids: set[str] = set()
+
+    if DEFAULT_LEDGER_HISTORY_PATH.exists():
+        payload = load_statement_history_payload(DEFAULT_LEDGER_HISTORY_PATH)
+        for entry in payload.get("ledger_entries", []):
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("entry_id", "") or "")
+            if entry_id and entry_id in seen_entry_ids:
+                continue
+            if entry_id:
+                seen_entry_ids.add(entry_id)
+            ledger_entries.append(dict(entry))
+
+    runtime_history_path = runtime_bookmaker_history_path(run_dir)
+    for entry in load_runtime_bookmaker_history_entries(runtime_history_path):
+        entry_id = str(entry.get("entry_id", "") or "")
+        if entry_id and entry_id in seen_entry_ids:
+            continue
+        if entry_id:
+            seen_entry_ids.add(entry_id)
+        ledger_entries.append(dict(entry))
+
+    for entry in _load_synthetic_smarkets_history_entries(run_dir):
+        entry_id = str(entry.get("entry_id", "") or "")
+        if entry_id and entry_id in seen_entry_ids:
+            continue
+        if entry_id:
+            seen_entry_ids.add(entry_id)
+        ledger_entries.append(dict(entry))
+
+    return {"ledger_entries": ledger_entries}
+
+
+def _load_historical_positions_for_run_dir(run_dir: Path | None) -> list[dict]:
+    payload = _load_combined_statement_history_payload(run_dir)
+    entries = payload.get("ledger_entries")
+    if not isinstance(entries, list):
+        return []
+
+    grouped_entries: dict[tuple[str, str, str], list[dict]] = {}
+    for entry in entries:
+        if not _is_historical_position_group_member(entry):
+            continue
+        group_key = _historical_position_group_key(entry)
+        grouped_entries.setdefault(group_key, []).append(entry)
+
+    historical_positions = [
+        _build_historical_position_row(group)
+        for group in grouped_entries.values()
+        if any(_is_historical_position_entry(entry) for entry in group)
+    ]
+    historical_positions.sort(
+        key=lambda row: (str(row.get("live_clock", "")), str(row.get("event", ""))),
+        reverse=True,
+    )
+    return historical_positions
+
+
+def _load_synthetic_smarkets_history_entries(run_dir: Path | None) -> list[dict]:
+    if run_dir is None:
+        return []
+    try:
+        payload = load_latest_page_payload_from_run_dir(
+            run_dir,
+            kind="history_snapshot",
+            page="history",
+        )
+    except ValueError:
+        return []
+
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return []
+    portfolio = metadata.get("smarkets_portfolio")
+    if not isinstance(portfolio, dict):
+        return []
+
+    captured_at = str(payload.get("captured_at", "") or "")
+    entries: list[dict] = []
+    for index, position in enumerate(portfolio.get("positions") or []):
+        if not isinstance(position, dict):
+            continue
+        entry = _build_synthetic_smarkets_history_entry(
+            position=position,
+            captured_at=captured_at,
+            index=index,
+        )
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _build_synthetic_smarkets_history_entry(
+    *,
+    position: dict,
+    captured_at: str,
+    index: int,
+) -> dict | None:
+    contract = str(position.get("contract", "") or "").strip()
+    market = str(position.get("market", "") or "").strip()
+    event = str(position.get("event", "") or "").strip()
+    if not contract or not market or not event:
+        return None
+
+    side = str(position.get("side", "") or "").strip().lower()
+    price = _optional_float(position.get("price")) or 0.0
+    raw_stake = _optional_float(position.get("stake"))
+    raw_liability = _optional_float(position.get("liability"))
+    return_amount = _optional_float(position.get("return_amount"))
+    current_value = (
+        _optional_float(position.get("current_value"))
+        if position.get("current_value") not in (None, "")
+        else return_amount
+    ) or 0.0
+    stake = raw_stake
+    if stake is None:
+        stake = _derive_smarkets_history_stake(
+            side=side,
+            price=price,
+            liability=raw_liability,
+            return_amount=return_amount,
+            current_value=current_value,
+        )
+    stake = stake or 0.0
+    liability = raw_liability
+    if liability is None:
+        liability = _derive_smarkets_history_liability(
+            side=side,
+            price=price,
+            stake=stake,
+            current_value=current_value,
+        )
+    liability = liability or 0.0
+    pnl_amount = _optional_float(position.get("pnl_amount"))
+    if pnl_amount is None:
+        pnl_amount = _derive_smarkets_history_pnl_amount(
+            side=side,
+            price=price,
+            stake=stake,
+            liability=liability,
+            return_amount=return_amount,
+            current_value=current_value,
+        )
+    status = str(position.get("status", "") or "Settled").strip().lower()
+    return {
+        "entry_id": f"run_history:{captured_at}:{index}",
+        "occurred_at": captured_at,
+        "platform": "smarkets",
+        "activity_type": "bet_settled",
+        "status": status,
+        "platform_kind": "exchange",
+        "exchange": "smarkets",
+        "event": event,
+        "market": market,
+        "selection": contract,
+        "side": "lay" if side == "sell" else "back",
+        "bet_type": "single",
+        "market_family": infer_market_family(
+            explicit_market_family=None,
+            market=market,
+        ),
+        "currency": "GBP",
+        "stake_gbp": stake,
+        "odds_decimal": price,
+        "exposure_gbp": (-abs(liability) if side == "sell" else abs(stake)),
+        "payout_gbp": None,
+        "realised_pnl_gbp": pnl_amount,
+        "reference": f"run_history:{index}",
+        "source_file": "events.jsonl",
+        "source_kind": "smarkets_run_history",
+        "description": str(position.get("status", "") or "Settled"),
+    }
+
+
+def sync_live_bookmaker_history(config: WorkerConfig) -> list[dict]:
+    return sync_live_bookmaker_history_for_run_dir(config.run_dir)
+
+
+def sync_live_bookmaker_history_for_run_dir(run_dir: Path | None) -> list[dict]:
+    history_path = runtime_bookmaker_history_path(run_dir)
+    if history_path is None:
+        return []
+    existing_payload = load_runtime_bookmaker_history_payload(history_path)
+    existing_entries = list(existing_payload.get("ledger_entries", []))
+    venue_updated_at = dict(existing_payload.get("venue_updated_at", {}))
+    sync_reports = dict(existing_payload.get("sync_reports", {}))
+    available_venues = _list_available_live_bookmaker_history_venues()
+    venues_to_capture = _select_due_live_bookmaker_history_venues(
+        available_venues=available_venues,
+        venue_updated_at=venue_updated_at,
+    )
+    if not venues_to_capture:
+        return existing_entries
+    sync_result = capture_live_bookmaker_history_entries(venues=venues_to_capture)
+    incoming_entries = list(sync_result.get("entries", []))
+    reports = list(sync_result.get("reports", []))
+    merged_entries = merge_runtime_bookmaker_history_entries(
+        existing_entries,
+        incoming_entries,
+    )
+    sync_timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    for venue in venues_to_capture:
+        venue_updated_at[venue] = sync_timestamp
+    for report in reports:
+        venue = str(report.get("venue", "") or "").strip()
+        if venue:
+            sync_reports[venue] = dict(report)
+        if run_dir is not None:
+            append_bookmaker_history_sync_event(run_dir / "events.jsonl", report)
+    if merged_entries or history_path.exists():
+        write_runtime_bookmaker_history_entries(
+            history_path,
+            merged_entries,
+            updated_at=sync_timestamp,
+            venue_updated_at=venue_updated_at,
+            sync_reports=sync_reports,
+        )
+    return merged_entries
+
+
+def _list_available_live_bookmaker_history_venues() -> list[str]:
+    try:
+        targets = list_debug_targets()
+    except Exception:
+        return []
+    available: list[str] = []
+    for venue in LIVE_VENUE_ORDER:
+        definition = LIVE_VENUE_DEFINITIONS.get(venue)
+        if definition is None:
+            continue
+        try:
+            select_debug_target_by_fragments(
+                targets=targets,
+                url_fragments=definition.url_fragments,
+            )
+        except ValueError:
+            continue
+        available.append(venue)
+    return available
+
+
+def _select_due_live_bookmaker_history_venues(
+    *,
+    available_venues: list[str],
+    venue_updated_at: dict[str, str],
+) -> list[str]:
+    due: list[str] = []
+    now = datetime.now(UTC)
+    for venue in available_venues:
+        updated_at = _parse_runtime_timestamp(venue_updated_at.get(venue))
+        if updated_at is None:
+            due.append(venue)
+            continue
+        age_seconds = (now - updated_at).total_seconds()
+        if age_seconds >= BOOKMAKER_HISTORY_SYNC_INTERVAL_SECONDS:
+            due.append(venue)
+    return due[:BOOKMAKER_HISTORY_SYNC_BATCH_SIZE]
+
+
+def _parse_runtime_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _find_matching_tracked_bet_index(
+    tracked_bets: list[dict],
+    *,
+    candidate: dict,
+) -> int | None:
+    for index, existing in enumerate(tracked_bets):
+        if _tracked_bets_match(existing, candidate):
+            return index
+    return None
+
+
+def _tracked_bets_match(left: dict, right: dict) -> bool:
+    left_platform = normalize_key(str(left.get("platform", "") or ""))
+    right_platform = normalize_key(str(right.get("platform", "") or ""))
+    if left_platform and right_platform and left_platform != right_platform:
+        return False
+    return (
+        event_matches(str(left.get("event", "") or ""), str(right.get("event", "") or ""))
+        and market_matches(str(left.get("market", "") or ""), str(right.get("market", "") or ""))
+        and text_matches(str(left.get("selection", "") or ""), str(right.get("selection", "") or ""))
+        and _tracked_bet_time_matches(left, right)
+    )
+
+
+def _tracked_bet_time_matches(left: dict, right: dict) -> bool:
+    left_settled = str(left.get("settled_at", "") or "").strip()
+    right_settled = str(right.get("settled_at", "") or "").strip()
+    if left_settled and right_settled:
+        return left_settled == right_settled
+    left_placed = str(left.get("placed_at", "") or "").strip()
+    right_placed = str(right.get("placed_at", "") or "").strip()
+    if left_placed and right_placed:
+        return left_placed == right_placed
+    return True
+
+
+def _merge_tracked_bet_rows(*, existing: dict, incoming: dict) -> dict:
+    merged = deepcopy(existing)
+    for field in (
+        "settled_at",
+        "realised_pnl_gbp",
+        "payout_gbp",
+        "funding_kind",
+        "bet_type",
+        "market_family",
+        "platform",
+        "platform_kind",
+        "exchange",
+        "sport_name",
+        "stake_gbp",
+        "potential_returns_gbp",
+        "back_price",
+        "lay_price",
+    ):
+        if merged.get(field) in (None, "", {}, []) and incoming.get(field) not in (None, "", {}, []):
+            merged[field] = incoming[field]
+
+    incoming_status = str(incoming.get("status", "") or "").strip()
+    existing_status = str(merged.get("status", "") or "").strip()
+    if _tracked_bet_sort_rank(incoming) > _tracked_bet_sort_rank(merged):
+        merged["status"] = incoming_status or existing_status
+    elif not existing_status and incoming_status:
+        merged["status"] = incoming_status
+
+    if incoming.get("expected_ev", {}).get("status") == "calculated" and merged.get("expected_ev", {}).get("status") != "calculated":
+        merged["expected_ev"] = incoming["expected_ev"]
+    if incoming.get("realised_ev", {}).get("status") == "calculated" and merged.get("realised_ev", {}).get("status") != "calculated":
+        merged["realised_ev"] = incoming["realised_ev"]
+
+    merged["legs"] = _merge_tracked_bet_legs(
+        merged.get("legs", []),
+        incoming.get("legs", []),
+    )
+    merged["activities"] = _merge_tracked_bet_activities(
+        merged.get("activities", []),
+        incoming.get("activities", []),
+    )
+    return merged
+
+
+def _merge_tracked_bet_legs(existing_legs: list[dict], incoming_legs: list[dict]) -> list[dict]:
+    merged = [deepcopy(leg) for leg in existing_legs if isinstance(leg, dict)]
+    for incoming_leg in incoming_legs:
+        if not isinstance(incoming_leg, dict):
+            continue
+        incoming_venue = normalize_key(str(incoming_leg.get("venue", "") or ""))
+        for index, existing_leg in enumerate(merged):
+            if normalize_key(str(existing_leg.get("venue", "") or "")) == incoming_venue:
+                merged[index] = deepcopy(existing_leg)
+                for field in (
+                    "status",
+                    "settled_at",
+                    "placed_at",
+                    "liability",
+                    "commission_rate",
+                    "market",
+                    "exchange",
+                ):
+                    if merged[index].get(field) in (None, "", {}, []) and incoming_leg.get(field) not in (None, "", {}, []):
+                        merged[index][field] = incoming_leg[field]
+                if _leg_status_rank(incoming_leg) > _leg_status_rank(existing_leg):
+                    merged[index]["status"] = incoming_leg.get("status", existing_leg.get("status"))
+                    if incoming_leg.get("settled_at") not in (None, ""):
+                        merged[index]["settled_at"] = incoming_leg["settled_at"]
+                break
+        else:
+            merged.append(deepcopy(incoming_leg))
+    return merged
+
+
+def _merge_tracked_bet_activities(existing_activities: list[dict], incoming_activities: list[dict]) -> list[dict]:
+    merged = [deepcopy(activity) for activity in existing_activities if isinstance(activity, dict)]
+    seen = {
+        (
+            str(activity.get("occurred_at", "") or ""),
+            str(activity.get("activity_type", "") or ""),
+            str(activity.get("source_file", "") or ""),
+            str(activity.get("raw_text", "") or ""),
+        )
+        for activity in merged
+    }
+    for activity in incoming_activities:
+        if not isinstance(activity, dict):
+            continue
+        key = (
+            str(activity.get("occurred_at", "") or ""),
+            str(activity.get("activity_type", "") or ""),
+            str(activity.get("source_file", "") or ""),
+            str(activity.get("raw_text", "") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(deepcopy(activity))
+    return merged
+
+
+def _tracked_bet_sort_rank(tracked_bet: dict) -> int:
+    status = normalize_key(str(tracked_bet.get("status", "") or ""))
+    if status in {"won", "lost", "settled"}:
+        return 3
+    if str(tracked_bet.get("settled_at", "") or "").strip():
+        return 3
+    if status in {"open", "matched"}:
+        return 2
+    return 1
+
+
+def _leg_status_rank(leg: dict) -> int:
+    status = normalize_key(str(leg.get("status", "") or ""))
+    if status in {"won", "lost", "settled"}:
+        return 3
+    if status in {"open", "matched"}:
+        return 2
+    return 1
 
 def load_watch_snapshot(
     *,
@@ -254,7 +819,7 @@ def build_exchange_panel_snapshot(watch: dict) -> dict:
         "account_stats": None,
         "open_positions": [],
         "historical_positions": [],
-        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(run_dir=None),
         "other_open_bets": [],
         "decisions": [],
         "watch": watch,
@@ -340,10 +905,10 @@ def build_live_venue_snapshot(
         "account_stats": None,
         "open_positions": [],
         "historical_positions": merge_historical_position_sources(
-            load_historical_positions(),
             load_smarkets_history_positions(config.run_dir),
+            _load_historical_positions_for_run_dir(config.run_dir),
         ),
-        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(run_dir=config.run_dir),
         "other_open_bets": [
             {
                 "venue": venue,
@@ -354,12 +919,22 @@ def build_live_venue_snapshot(
                 "odds": float(row.get("odds", 0.0)),
                 "stake": float(row.get("stake", 0.0)),
                 "status": str(row.get("status", "open")),
+                "bet_type": str(row.get("bet_type", "")),
+                "funding_kind": infer_funding_kind(
+                    explicit_funding_kind=row.get("funding_kind"),
+                    notes=row.get("notes"),
+                    bet_type=row.get("bet_type"),
+                    status=row.get("status"),
+                    free_bet=row.get("free_bet"),
+                ),
+                "current_cashout_value": _optional_float(row.get("current_cashout_value")),
+                "supports_cash_out": bool(row.get("supports_cash_out", False)),
             }
             for row in open_bets
         ],
         "decisions": [],
         "watch": None,
-        "tracked_bets": load_tracked_bets(config.companion_legs_path),
+        "tracked_bets": _load_existing_tracked_bets(config),
         "exit_policy": build_exit_policy_summary(
             {"target_profit": 0.0, "stop_loss": 0.0},
             hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
@@ -410,14 +985,14 @@ def build_unavailable_live_venue_snapshot(
         "account_stats": None,
         "open_positions": [],
         "historical_positions": merge_historical_position_sources(
-            load_historical_positions(),
             load_smarkets_history_positions(config.run_dir),
+            _load_historical_positions_for_run_dir(config.run_dir),
         ),
-        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(run_dir=config.run_dir),
         "other_open_bets": [],
         "decisions": [],
         "watch": None,
-        "tracked_bets": load_tracked_bets(config.companion_legs_path),
+        "tracked_bets": _load_existing_tracked_bets(config),
         "exit_policy": build_exit_policy_summary(
             {"target_profit": 0.0, "stop_loss": 0.0},
             hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
@@ -461,14 +1036,14 @@ def build_waiting_for_watcher_snapshot(*, config: WorkerConfig, detail: str) -> 
         "account_stats": None,
         "open_positions": [],
         "historical_positions": merge_historical_position_sources(
-            load_historical_positions(),
             load_smarkets_history_positions(config.run_dir),
+            _load_historical_positions_for_run_dir(config.run_dir),
         ),
-        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(run_dir=config.run_dir),
         "other_open_bets": [],
         "decisions": [],
         "watch": None,
-        "tracked_bets": load_tracked_bets(config.companion_legs_path),
+        "tracked_bets": _load_existing_tracked_bets(config),
         "exit_policy": build_exit_policy_summary(
             {"target_profit": 0.0, "stop_loss": 0.0},
             hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
@@ -535,7 +1110,7 @@ def build_horse_matcher_snapshot_response(
         "account_stats": None,
         "open_positions": [],
         "historical_positions": [],
-        "ledger_pnl_summary": load_ledger_pnl_summary(),
+        "ledger_pnl_summary": load_ledger_pnl_summary(run_dir=None),
         "other_open_bets": [],
         "decisions": [],
         "watch": None,
@@ -619,6 +1194,14 @@ def load_other_open_bets(payload_path: Path | None) -> list[dict]:
             "odds": float(bet["odds"]),
             "stake": float(bet["stake"]),
             "status": str(bet["status"]),
+            "bet_type": str(bet.get("bet_type", "")),
+            "funding_kind": infer_funding_kind(
+                explicit_funding_kind=bet.get("funding_kind"),
+                notes=bet.get("notes"),
+                bet_type=bet.get("bet_type"),
+                status=bet.get("status"),
+                free_bet=bet.get("free_bet"),
+            ),
             "current_cashout_value": _optional_float(bet.get("current_cashout_value")),
             "supports_cash_out": bool(bet.get("supports_cash_out", False)),
         }
@@ -646,6 +1229,14 @@ def capture_live_other_open_bets() -> list[dict]:
                     "odds": float(row.get("odds", 0.0)),
                     "stake": float(row.get("stake", 0.0)),
                     "status": str(row.get("status", "open")),
+                    "bet_type": str(row.get("bet_type", "")),
+                    "funding_kind": infer_funding_kind(
+                        explicit_funding_kind=row.get("funding_kind"),
+                        notes=row.get("notes"),
+                        bet_type=row.get("bet_type"),
+                        status=row.get("status"),
+                        free_bet=row.get("free_bet"),
+                    ),
                     "current_cashout_value": _optional_float(row.get("current_cashout_value")),
                     "supports_cash_out": bool(row.get("supports_cash_out", False)),
                 }
@@ -653,9 +1244,24 @@ def capture_live_other_open_bets() -> list[dict]:
     return collected
 
 
+def capture_live_bookmaker_history_entries(venues: list[str] | None = None) -> dict:
+    collected: list[dict] = []
+    reports: list[dict] = []
+    effective_venues = [
+        venue for venue in (venues or list(LIVE_VENUE_ORDER)) if venue in LIVE_VENUE_ORDER
+    ]
+    for venue in effective_venues:
+        report = capture_live_venue_history_sync_report(venue)
+        reports.append({key: value for key, value in report.items() if key != "entries"})
+        collected.extend(
+            [dict(entry) for entry in report.get("entries", []) if isinstance(entry, dict)]
+        )
+    return {"entries": collected, "reports": reports}
+
+
 def merge_other_open_bets(primary: list[dict], secondary: list[dict]) -> list[dict]:
     merged: list[dict] = []
-    seen: set[tuple[str, str, str, str, float, float, str]] = set()
+    seen: dict[tuple[str, str, str, str, float, float, str, float | None], dict] = {}
 
     for row in [*(primary or []), *(secondary or [])]:
         normalized = {
@@ -667,6 +1273,14 @@ def merge_other_open_bets(primary: list[dict], secondary: list[dict]) -> list[di
             "odds": float(row.get("odds", 0.0)),
             "stake": float(row.get("stake", 0.0)),
             "status": str(row.get("status", "open")),
+            "bet_type": str(row.get("bet_type", "")),
+            "funding_kind": infer_funding_kind(
+                explicit_funding_kind=row.get("funding_kind"),
+                notes=row.get("notes"),
+                bet_type=row.get("bet_type"),
+                status=row.get("status"),
+                free_bet=row.get("free_bet"),
+            ),
             "current_cashout_value": _optional_float(row.get("current_cashout_value")),
             "supports_cash_out": bool(row.get("supports_cash_out", False)),
         }
@@ -680,20 +1294,42 @@ def merge_other_open_bets(primary: list[dict], secondary: list[dict]) -> list[di
             normalized["status"],
             normalized["current_cashout_value"],
         )
-        if dedupe_key in seen:
+        existing = seen.get(dedupe_key)
+        if existing is not None:
+            if (
+                normalize_funding_kind(existing.get("funding_kind"))
+                in {"", "unknown"}
+                and normalize_funding_kind(normalized.get("funding_kind")) not in {"", "unknown"}
+            ):
+                existing["funding_kind"] = normalized["funding_kind"]
+            if not str(existing.get("bet_type", "")).strip() and str(
+                normalized.get("bet_type", "")
+            ).strip():
+                existing["bet_type"] = normalized["bet_type"]
+            if existing.get("current_cashout_value") is None and normalized.get(
+                "current_cashout_value"
+            ) is not None:
+                existing["current_cashout_value"] = normalized["current_cashout_value"]
+            if not existing.get("supports_cash_out") and normalized.get("supports_cash_out"):
+                existing["supports_cash_out"] = True
             continue
-        seen.add(dedupe_key)
+        seen[dedupe_key] = normalized
         merged.append(normalized)
 
     return merged
 
 
-def load_historical_positions(payload_path: Path | None = None) -> list[dict]:
-    candidate_path = payload_path or DEFAULT_LEDGER_HISTORY_PATH
-    if candidate_path is None or not candidate_path.exists():
-        return []
-
-    payload = json.loads(candidate_path.read_text())
+def load_historical_positions(
+    payload_path: Path | None = None,
+    *,
+    run_dir: Path | None = None,
+) -> list[dict]:
+    if payload_path is None:
+        payload = _load_combined_statement_history_payload(run_dir)
+    else:
+        if not payload_path.exists():
+            return []
+        payload = json.loads(payload_path.read_text())
     entries = payload.get("ledger_entries")
     if not isinstance(entries, list):
         return []
@@ -777,12 +1413,17 @@ def merge_historical_position_sources(*sources: list[dict]) -> list[dict]:
     return merged
 
 
-def load_ledger_pnl_summary(payload_path: Path | None = None) -> dict:
-    candidate_path = payload_path or DEFAULT_LEDGER_HISTORY_PATH
-    if candidate_path is None or not candidate_path.exists():
-        return _empty_ledger_pnl_summary()
-
-    payload = json.loads(candidate_path.read_text())
+def load_ledger_pnl_summary(
+    payload_path: Path | None = None,
+    *,
+    run_dir: Path | None = None,
+) -> dict:
+    if payload_path is None:
+        payload = _load_combined_statement_history_payload(run_dir)
+    else:
+        if not payload_path.exists():
+            return _empty_ledger_pnl_summary()
+        payload = json.loads(payload_path.read_text())
     entries = payload.get("ledger_entries")
     if not isinstance(entries, list):
         return _empty_ledger_pnl_summary()
@@ -879,6 +1520,12 @@ def _empty_ledger_pnl_summary() -> dict:
 
 def _classify_ledger_funding_kind(entry: dict) -> str:
     activity_type = str(entry.get("activity_type", "") or "").strip().lower()
+    explicit_funding_kind = normalize_funding_kind(entry.get("funding_kind"))
+    if funding_kind_is_promo(explicit_funding_kind):
+        return "promo"
+    if funding_kind_is_cash(explicit_funding_kind):
+        return "standard"
+
     text_parts = [
         activity_type,
         str(entry.get("description", "") or ""),
@@ -890,23 +1537,14 @@ def _classify_ledger_funding_kind(entry: dict) -> str:
     raw_fields = entry.get("raw_fields") or {}
     if isinstance(raw_fields, dict):
         text_parts.extend(str(value) for value in raw_fields.values() if value not in (None, ""))
-    haystack = " ".join(text_parts).lower()
+    inferred_funding_kind = infer_funding_kind(
+        explicit_funding_kind="",
+        notes=" ".join(text_parts),
+        bet_type=entry.get("bet_type"),
+        status=entry.get("status"),
+    )
 
-    if any(
-        keyword in haystack
-        for keyword in (
-            "free bet",
-            "freebet",
-            "snr",
-            "stake returned",
-            "risk free",
-            "refund",
-            "promo",
-            "promotion",
-            "bonus",
-            "boost",
-        )
-    ):
+    if funding_kind_is_promo(inferred_funding_kind):
         return "promo"
 
     if activity_type in {
@@ -919,7 +1557,7 @@ def _classify_ledger_funding_kind(entry: dict) -> str:
     }:
         return "standard"
 
-    if any(keyword in haystack for keyword in ("qualifying", "cash", "normal")):
+    if funding_kind_is_cash(inferred_funding_kind):
         return "standard"
 
     return "unknown"
@@ -935,19 +1573,46 @@ def _build_smarkets_history_position_row(
     if not contract or not market:
         return None
 
+    side = str(position.get("side", "") or "").strip().lower()
     price = _optional_float(position.get("price")) or 0.0
-    stake = _optional_float(position.get("stake")) or 0.0
-    liability = (
-        _optional_float(position.get("liability"))
-        or (stake if str(position.get("side", "") or "").lower() == "buy" else 0.0)
-        or stake
-    )
+    raw_stake = _optional_float(position.get("stake"))
+    raw_liability = _optional_float(position.get("liability"))
+    return_amount = _optional_float(position.get("return_amount"))
     current_value = (
         _optional_float(position.get("current_value"))
         if position.get("current_value") not in (None, "")
-        else _optional_float(position.get("return_amount"))
+        else return_amount
     ) or 0.0
-    pnl_amount = _optional_float(position.get("pnl_amount")) or 0.0
+    stake = raw_stake
+    if stake is None:
+        stake = _derive_smarkets_history_stake(
+            side=side,
+            price=price,
+            liability=raw_liability,
+            return_amount=return_amount,
+            current_value=current_value,
+        )
+    stake = stake or 0.0
+    liability = raw_liability
+    if liability is None:
+        liability = _derive_smarkets_history_liability(
+            side=side,
+            price=price,
+            stake=stake,
+            current_value=current_value,
+        )
+    liability = liability or (stake if side == "buy" else 0.0) or stake
+    pnl_amount = _optional_float(position.get("pnl_amount"))
+    if pnl_amount is None:
+        pnl_amount = _derive_smarkets_history_pnl_amount(
+            side=side,
+            price=price,
+            stake=stake,
+            liability=liability,
+            return_amount=return_amount,
+            current_value=current_value,
+        )
+    pnl_amount = pnl_amount or 0.0
     event_status = str(position.get("event_status", "") or "").strip()
     status = str(position.get("status", "") or "").strip() or "Settled"
     event = str(position.get("event", "") or "").strip()
@@ -967,6 +1632,7 @@ def _build_smarkets_history_position_row(
         "liability": liability,
         "current_value": current_value,
         "pnl_amount": pnl_amount,
+        "overall_pnl_known": False,
         "current_back_odds": price or None,
         "current_implied_probability": (1.0 / price) if price else None,
         "current_implied_percentage": (100.0 / price) if price else None,
@@ -980,6 +1646,93 @@ def _build_smarkets_history_position_row(
         "live_clock": captured_at,
         "can_trade_out": False,
     }
+
+
+def _derive_smarkets_history_stake(
+    *,
+    side: str,
+    price: float,
+    liability: float | None,
+    return_amount: float | None,
+    current_value: float,
+) -> float | None:
+    if side == "buy":
+        if liability is not None:
+            return liability
+        if current_value < 0:
+            return round(abs(current_value), 2)
+        if price > 0:
+            candidate = return_amount if return_amount not in (None, 0.0) else current_value
+            if candidate not in (None, 0.0):
+                return round(abs(candidate) / price, 2)
+        return None
+
+    if side == "sell":
+        if liability is not None and price > 1.0:
+            return round(liability / (price - 1.0), 2)
+        if price > 0:
+            candidate = return_amount if return_amount not in (None, 0.0) else current_value
+            if candidate is not None and candidate > 0:
+                return round(candidate / price, 2)
+        return None
+
+    return None
+
+
+def _derive_smarkets_history_liability(
+    *,
+    side: str,
+    price: float,
+    stake: float,
+    current_value: float,
+) -> float | None:
+    if side == "buy":
+        return round(stake, 2) if stake > 0 else None
+
+    if side == "sell":
+        if current_value < 0:
+            return round(abs(current_value), 2)
+        if stake > 0 and price > 1.0:
+            return round(stake * (price - 1.0), 2)
+        return None
+
+    return None
+
+
+def _derive_smarkets_history_pnl_amount(
+    *,
+    side: str,
+    price: float,
+    stake: float,
+    liability: float,
+    return_amount: float | None,
+    current_value: float,
+) -> float | None:
+    if current_value < 0:
+        return round(current_value, 2)
+
+    if side == "buy":
+        baseline = stake if stake > 0 else None
+        if baseline is None and price > 0:
+            candidate = return_amount if return_amount not in (None, 0.0) else current_value
+            if candidate not in (None, 0.0):
+                baseline = abs(candidate) / price
+        if baseline is not None:
+            return round(current_value - baseline, 2)
+        return None
+
+    if side == "sell":
+        if liability > 0:
+            return round(current_value - liability, 2)
+        if stake > 0:
+            return round(stake, 2)
+        if price > 0:
+            candidate = return_amount if return_amount not in (None, 0.0) else current_value
+            if candidate is not None and candidate > 0:
+                return round(candidate / price, 2)
+        return None
+
+    return None
 
 
 def _historical_position_group_key(entry: dict) -> tuple[str, str, str]:
@@ -1151,14 +1904,14 @@ def load_exchange_snapshot_for_config(
                 "account_stats": None,
                 "open_positions": [],
                 "historical_positions": merge_historical_position_sources(
-                    load_historical_positions(),
                     load_smarkets_history_positions(config.run_dir),
+                    _load_historical_positions_for_run_dir(config.run_dir),
                 ),
                 "other_open_bets": [],
                 "decisions": [],
                 "watch": watcher_state.get("watch"),
                 "warnings": watcher_state.get("warnings", []),
-                "tracked_bets": [],
+                "tracked_bets": _load_existing_tracked_bets(config),
                 "exit_policy": build_exit_policy_summary(
                     watcher_state.get("watch") or {},
                     hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
@@ -1192,24 +1945,45 @@ def load_exchange_snapshot_for_config(
             snapshot = build_exchange_panel_snapshot(watch)
             snapshot["worker"] = worker
             snapshot["account_stats"] = watcher_state.get("account_stats")
+            if capture_live:
+                sync_live_bookmaker_history(config)
             snapshot["open_positions"] = (
                 fresh_positions_analysis["positions"]
                 if prefer_fresh_positions
                 else watcher_open_positions
             )
             snapshot["historical_positions"] = merge_historical_position_sources(
-                load_historical_positions(),
                 load_smarkets_history_positions(config.run_dir),
+                _load_historical_positions_for_run_dir(config.run_dir),
             )
-            snapshot["ledger_pnl_summary"] = load_ledger_pnl_summary()
+            snapshot["ledger_pnl_summary"] = load_ledger_pnl_summary(run_dir=config.run_dir)
             snapshot["other_open_bets"] = merge_other_open_bets(
                 watcher_state.get("other_open_bets", []),
-                capture_live_other_open_bets(),
+                (
+                    capture_live_other_open_bets()
+                    if capture_live
+                    else _load_cached_other_open_bets(cached_snapshot)
+                ),
             )
             snapshot["decisions"] = watcher_state.get("decisions", [])
             snapshot["watch"] = watcher_state.get("watch")
             snapshot["warnings"] = watcher_state.get("warnings", [])
-            snapshot["tracked_bets"] = load_tracked_bets(config.companion_legs_path)
+            captured_at = str(
+                (
+                    fresh_positions_payload.get("captured_at", "")
+                    if prefer_fresh_positions and fresh_positions_payload is not None
+                    else watcher_state.get("updated_at", "")
+                )
+                or ""
+            )
+            snapshot["tracked_bets"] = _sync_tracked_bets_for_snapshot(
+                config=config,
+                open_positions=snapshot["open_positions"],
+                other_open_bets=snapshot["other_open_bets"],
+                historical_positions=snapshot["historical_positions"],
+                captured_at=captured_at,
+                commission_rate=config.commission_rate,
+            )
             snapshot["exit_recommendations"] = build_exit_recommendations(
                 tracked_bets=snapshot["tracked_bets"],
                 open_positions=snapshot["open_positions"],
@@ -1254,18 +2028,28 @@ def load_exchange_snapshot_for_config(
     snapshot["account_stats"] = positions_analysis.get(
         "account_stats"
     ) or load_account_stats(config.account_payload_path)
+    if capture_live:
+        sync_live_bookmaker_history(config)
     snapshot["open_positions"] = positions_analysis["positions"]
     snapshot["historical_positions"] = merge_historical_position_sources(
-        load_historical_positions(),
         load_smarkets_history_positions(config.run_dir),
+        _load_historical_positions_for_run_dir(config.run_dir),
     )
-    snapshot["ledger_pnl_summary"] = load_ledger_pnl_summary()
-    snapshot["other_open_bets"] = (
+    snapshot["ledger_pnl_summary"] = load_ledger_pnl_summary(run_dir=config.run_dir)
+    snapshot["other_open_bets"] = merge_other_open_bets(
         positions_analysis.get("other_open_bets")
-        or load_other_open_bets(config.open_bets_payload_path)
+        or load_other_open_bets(config.open_bets_payload_path),
+        capture_live_other_open_bets() if capture_live else _load_cached_other_open_bets(cached_snapshot),
     )
     snapshot["decisions"] = load_decisions(run_dir=config.run_dir)
-    snapshot["tracked_bets"] = load_tracked_bets(config.companion_legs_path)
+    snapshot["tracked_bets"] = _sync_tracked_bets_for_snapshot(
+        config=config,
+        open_positions=snapshot["open_positions"],
+        other_open_bets=snapshot["other_open_bets"],
+        historical_positions=snapshot["historical_positions"],
+        captured_at=str(positions_payload.get("captured_at", "") or ""),
+        commission_rate=config.commission_rate,
+    )
     snapshot["exit_recommendations"] = build_exit_recommendations(
         tracked_bets=snapshot["tracked_bets"],
         open_positions=snapshot["open_positions"],
@@ -1495,13 +2279,23 @@ def handle_worker_request(
         return response, resolved_config, effective_selected_venue
 
     if request_name == "RefreshCached":
-        response = build_worker_snapshot_response(
-            load_exchange_snapshot_for_config(
+        try:
+            snapshot = load_exchange_snapshot_for_config(
                 resolved_config,
                 selected_venue=effective_selected_venue,
                 capture_live=False,
                 cached_snapshot=cached_snapshot,
-            ),
+            )
+        except ValueError as exc:
+            if _should_return_waiting_snapshot(resolved_config, exc):
+                snapshot = build_waiting_for_watcher_snapshot(
+                    config=resolved_config,
+                    detail="Recorder started; waiting for first snapshot.",
+                )
+            else:
+                raise
+        response = build_worker_snapshot_response(
+            snapshot,
             refresh_kind="cached",
             run_dir=resolved_config.run_dir,
         )

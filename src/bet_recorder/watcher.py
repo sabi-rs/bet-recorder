@@ -16,9 +16,14 @@ from bet_recorder.analysis.position_watch import build_smarkets_watch_plan
 from bet_recorder.browser.agent_browser import AgentBrowserClient
 from bet_recorder.browser.models import BrowserPageState
 from bet_recorder.capture.run_bundle import load_run_bundle
+from bet_recorder.bookmaker_history_runtime import (
+    load_runtime_bookmaker_history_payload,
+    runtime_bookmaker_history_path,
+)
 from bet_recorder.exchange_worker import (
     analyze_positions_payload,
     build_exchange_panel_snapshot,
+    sync_live_bookmaker_history_for_run_dir,
 )
 from bet_recorder.live.agent_browser_capture import (
     capture_agent_browser_page_state,
@@ -172,6 +177,18 @@ def _run_watcher_loop(
                 captured_at=captured_at,
             )
             latest_state["session"] = build_session_diagnostics(payload, config)
+            try:
+                sync_live_bookmaker_history_for_run_dir(config.run_dir)
+                history_payload = load_runtime_bookmaker_history_payload(
+                    runtime_bookmaker_history_path(config.run_dir)
+                )
+                latest_state["bookmaker_history_sync"] = list(
+                    history_payload.get("sync_reports", {}).values()
+                )
+            except Exception as error:
+                latest_state.setdefault("warnings", []).append(
+                    f"bookmaker history sync failed: {error}"
+                )
         except Exception as error:
             latest_state = build_watcher_error_state(
                 source="smarkets_exchange",

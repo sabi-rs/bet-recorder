@@ -545,6 +545,99 @@ def test_load_exchange_snapshot_merges_run_bundle_history_snapshot(
     assert snapshot["historical_positions"][0]["live_clock"] == "2026-03-20T12:00:00Z"
 
 
+def test_load_smarkets_history_positions_derives_missing_pnl_from_settled_rows(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-22T16:10:26Z",
+                "source": "smarkets_exchange",
+                "kind": "history_snapshot",
+                "page": "history",
+                "url": "https://smarkets.com/portfolio/?time=all&order-state=settled",
+                "document_title": "Smarkets Predictions",
+                "body_text": "Settled orders",
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": [],
+                "resource_hosts": [],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": ["settled-history"],
+                "metadata": {
+                    "smarkets_portfolio": {
+                        "extractor": "dom-v1",
+                        "groups": [],
+                        "positions": [
+                            {
+                                "side": "buy",
+                                "contract": "Tottenham",
+                                "market": "Full-time result",
+                                "event": "Tottenham vs Atletico Madrid",
+                                "event_status": "Event ended|UEFA Champions League",
+                                "event_url": "https://smarkets.com/football/tottenham-vs-atletico",
+                                "price": 1.40,
+                                "stake": 17.57,
+                                "liability": 17.57,
+                                "return_amount": 24.60,
+                                "current_value": 24.60,
+                                "pnl_amount": None,
+                                "pnl_percent": None,
+                                "status": "Won",
+                                "can_trade_out": False,
+                            },
+                            {
+                                "side": "sell",
+                                "contract": "Tottenham",
+                                "market": "Full-time result",
+                                "event": "Tottenham vs Atletico Madrid",
+                                "event_status": "Event ended|UEFA Champions League",
+                                "event_url": "https://smarkets.com/football/tottenham-vs-atletico",
+                                "price": 2.46,
+                                "stake": None,
+                                "liability": None,
+                                "return_amount": -14.60,
+                                "current_value": -14.60,
+                                "pnl_amount": None,
+                                "pnl_percent": None,
+                                "status": "Lost",
+                                "can_trade_out": False,
+                            },
+                            {
+                                "side": "sell",
+                                "contract": "Thorneylands",
+                                "market": "To win",
+                                "event": "13:45 - Carlisle",
+                                "event_status": "Event ended|Carlisle",
+                                "event_url": "",
+                                "price": 5.0,
+                                "stake": None,
+                                "liability": None,
+                                "return_amount": 50.0,
+                                "current_value": 50.0,
+                                "pnl_amount": None,
+                                "pnl_percent": None,
+                                "status": "Won",
+                                "can_trade_out": False,
+                            },
+                        ],
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+
+    rows = exchange_worker_module.load_smarkets_history_positions(run_dir)
+
+    assert [row["pnl_amount"] for row in rows] == [7.03, -14.6, 10.0]
+    assert all(row["overall_pnl_known"] is False for row in rows)
+
+
 def test_load_ledger_pnl_summary_uses_raw_ledger_totals_and_builds_points(
     tmp_path: Path,
 ) -> None:
@@ -996,6 +1089,93 @@ def test_handle_worker_request_line_preserves_config_after_request_error(
 
     assert refreshed_config == resolved_config
     assert "request_error" not in success_response
+    assert success_response["snapshot"]["watch"]["watch_count"] == 1
+
+
+def test_refresh_cached_returns_waiting_snapshot_until_first_live_capture_arrives(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    events_path = run_dir / "events.jsonl"
+    events_path.write_text("")
+
+    config = WorkerConfig(
+        positions_payload_path=None,
+        run_dir=run_dir,
+        account_payload_path=None,
+        open_bets_payload_path=None,
+        companion_legs_path=None,
+        agent_browser_session="helium-copy",
+        commission_rate=0.0,
+        target_profit=1.0,
+        stop_loss=1.0,
+        hard_margin_call_profit_floor=None,
+        warn_only_default=True,
+    )
+    request_line = json.dumps(
+        {
+            "LoadDashboard": {
+                "config": worker_config_payload(config),
+            }
+        }
+    )
+
+    first_response, resolved_config = handle_worker_request_line(
+        request_line=request_line,
+        config=None,
+    )
+
+    assert "request_error" not in first_response
+    assert first_response["snapshot"]["worker"]["status"] == "busy"
+    assert resolved_config == config
+
+    waiting_response, refreshed_config = handle_worker_request_line(
+        request_line=json.dumps("RefreshCached"),
+        config=resolved_config,
+    )
+
+    assert "request_error" not in waiting_response
+    assert waiting_response["snapshot"]["worker"]["status"] == "busy"
+    assert refreshed_config == resolved_config
+
+    events_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-11T11:05:00Z",
+                "source": "smarkets_exchange",
+                "kind": "positions_snapshot",
+                "page": "open_positions",
+                "url": "https://smarkets.com/open-positions",
+                "document_title": "Open positions",
+                "body_text": (
+                    "Available balance £150.00 Exposure £23.29 Unrealized P/L £2.10 "
+                    "Open Bets Back Arsenal Full-time result 2.12 £5.00 Open "
+                    "Lazio vs Sassuolo "
+                    "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 "
+                    "(3.13%) Order filled Trade out"
+                ),
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+                "resource_hosts": ["smarkets.com"],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": [],
+            },
+        )
+        + "\n",
+    )
+
+    success_response, next_config = handle_worker_request_line(
+        request_line=json.dumps("RefreshCached"),
+        config=refreshed_config,
+    )
+
+    assert next_config == resolved_config
+    assert "request_error" not in success_response
+    assert success_response["snapshot"]["worker"]["status"] == "ready"
     assert success_response["snapshot"]["watch"]["watch_count"] == 1
 
 
@@ -1470,6 +1650,189 @@ def test_load_exchange_snapshot_skips_live_capture_when_watcher_state_is_fresh(
     assert snapshot["worker"]["status"] == "ready"
 
 
+def test_load_exchange_snapshot_skips_bookmaker_sync_for_cached_watcher_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-11T11:05:00Z",
+                "source": "smarkets_exchange",
+                "kind": "positions_snapshot",
+                "page": "open_positions",
+                "url": "https://smarkets.com/portfolio/?order-state=active",
+                "document_title": "Smarkets Predictions",
+                "body_text": "Available balance £120.45 Exposure £0.00 Unrealized P/L £0.00",
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+                "resource_hosts": ["smarkets.com"],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": [],
+            },
+        )
+        + "\n",
+    )
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2999-03-11T11:05:00Z",
+                "interval_seconds": 5.0,
+                "iteration": 9,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "watcher stable",
+                },
+                "open_positions": [],
+                "other_open_bets": [],
+                "watch": {
+                    "position_count": 0,
+                    "watch_count": 0,
+                    "commission_rate": 0.0,
+                    "target_profit": 1.0,
+                    "stop_loss": 1.0,
+                    "watches": [],
+                },
+                "decision_count": 0,
+                "decisions": [],
+            },
+        )
+        + "\n",
+    )
+
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.sync_live_bookmaker_history",
+        lambda config: (_ for _ in ()).throw(
+            AssertionError("cached snapshot should not sync bookmaker history")
+        ),
+    )
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_live_other_open_bets",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("cached snapshot should not scrape live bookmaker tabs")
+        ),
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session="helium-copy",
+        ),
+        capture_live=False,
+        cached_snapshot={
+            "other_open_bets": [
+                {
+                    "venue": "bet365",
+                    "event": "Brumbies vs Chiefs",
+                    "label": "Brumbies",
+                    "market": "Winner",
+                    "side": "back",
+                    "odds": 3.1,
+                    "stake": 10.0,
+                    "status": "open",
+                    "funding_kind": "cash",
+                }
+            ]
+        },
+    )
+
+    assert snapshot["runtime"]["source"] == "watcher-state"
+    assert snapshot["other_open_bets"][0]["venue"] == "bet365"
+
+
+def test_sync_live_bookmaker_history_limits_sync_to_one_due_available_venue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    history_path = run_dir / "auto-bookmaker-history.json"
+    history_path.write_text(
+        json.dumps(
+            {
+                "source": "auto_live_bookmaker_history",
+                "updated_at": "2026-03-22T17:00:00Z",
+                "venue_updated_at": {
+                    "bet365": "2999-03-22T17:00:00Z",
+                    "betuk": "2026-03-22T17:00:00Z",
+                },
+                "ledger_entries": [],
+            }
+        )
+        + "\n"
+    )
+    seen_venues: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "_list_available_live_bookmaker_history_venues",
+        lambda: ["bet365", "betuk", "betway"],
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_live_bookmaker_history_entries",
+        lambda venues=None: seen_venues.append(tuple(venues or [])) or {
+            "entries": [],
+            "reports": [
+                {
+                    "venue": "betuk",
+                    "status": "no_rows",
+                    "started_at": "2026-03-22T17:00:00Z",
+                    "finished_at": "2026-03-22T17:00:01Z",
+                    "summary": "betuk history sync no_rows",
+                    "detail": "No settled history rows were extracted from the captured venue surface.",
+                    "rows_extracted": 0,
+                    "page": "my_bets",
+                    "url": "https://www.betuk.com/betting#bethistory",
+                    "document_title": "BetUK History",
+                    "trace": [],
+                }
+            ],
+        },
+    )
+
+    exchange_worker_module.sync_live_bookmaker_history(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        )
+    )
+
+    payload = json.loads(history_path.read_text())
+
+    assert seen_venues == [("betuk",)]
+    assert payload["sync_reports"]["betuk"]["status"] == "no_rows"
+    event_lines = (run_dir / "events.jsonl").read_text().splitlines()
+    assert any('"kind": "bookmaker_history_sync"' in line for line in event_lines)
+    assert "betway" not in payload["venue_updated_at"]
+    assert payload["venue_updated_at"]["bet365"] == "2999-03-22T17:00:00Z"
+    assert payload["venue_updated_at"]["betuk"]
+
+
 def test_load_exchange_snapshot_prefers_ready_watcher_state_positions(
     tmp_path: Path,
 ) -> None:
@@ -1704,7 +2067,7 @@ def test_load_exchange_snapshot_prefers_newer_positions_payload_over_lagging_wat
             warn_only_default=True,
             agent_browser_session=None,
         ),
-        capture_live=False,
+        capture_live=True,
     )
 
     assert len(snapshot["open_positions"]) == 3
@@ -1914,6 +2277,586 @@ def test_exchange_worker_session_merges_companion_legs_into_tracked_bets(
     assert snapshot["exit_recommendations"][0]["reason"] == "within_thresholds"
 
 
+def test_exchange_worker_session_auto_backfills_tracked_bets_from_default_ledger_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    positions_payload_path = tmp_path / "smarkets-open-positions.json"
+    positions_payload_path.write_text(
+        json.dumps(
+            {
+                "page": "open_positions",
+                "body_text": (
+                    "Available balance £120.45 Exposure £41.63 Unrealized P/L -£0.49 "
+                    "Lazio vs Sassuolo "
+                    "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 "
+                    "(3.13%) Order filled Trade out"
+                ),
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+            },
+        ),
+    )
+    ledger_history_path = tmp_path / "statement-history.json"
+    ledger_history_path.write_text(
+        json.dumps(
+            {
+                "ledger_entries": [
+                    {
+                        "entry_id": "bet10:won",
+                        "occurred_at": "2026-03-22T16:10:26Z",
+                        "platform": "bet10",
+                        "activity_type": "bet_settled",
+                        "status": "won",
+                        "platform_kind": "sportsbook",
+                        "event": "Lazio vs Sassuolo",
+                        "market": "Full-time result",
+                        "selection": "Draw",
+                        "bet_type": "single",
+                        "market_family": "match_odds",
+                        "funding_kind": "free_bet",
+                        "sport_name": "Serie A",
+                        "stake_gbp": 10.0,
+                        "odds_decimal": 4.2,
+                        "payout_gbp": 42.0,
+                        "realised_pnl_gbp": 32.0,
+                        "source_file": "bet10.txt",
+                        "description": "Free Bet SNR",
+                    },
+                    {
+                        "entry_id": "smarkets:placed",
+                        "occurred_at": "2026-03-22T15:05:00Z",
+                        "platform": "smarkets",
+                        "activity_type": "bet_placed",
+                        "status": "placed",
+                        "platform_kind": "exchange",
+                        "exchange": "smarkets",
+                        "event": "Lazio vs Sassuolo",
+                        "market": "Full-time result",
+                        "selection": "Draw",
+                        "side": "lay",
+                        "market_family": "match_odds",
+                        "stake_gbp": 9.91,
+                        "odds_decimal": 3.35,
+                        "exposure_gbp": -23.29,
+                        "source_file": "smarkets.csv",
+                        "description": "Bet Placed · Against Draw",
+                    },
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "DEFAULT_LEDGER_HISTORY_PATH",
+        ledger_history_path,
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=positions_payload_path,
+            run_dir=None,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=5.0,
+            stop_loss=5.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+    )
+
+    assert len(snapshot["tracked_bets"]) == 1
+    assert snapshot["tracked_bets"][0]["platform"] == "bet10"
+    assert snapshot["tracked_bets"][0]["funding_kind"] == "free_bet"
+    assert snapshot["tracked_bets"][0]["realised_pnl_gbp"] == pytest.approx(8.71)
+    assert snapshot["tracked_bets"][0]["legs"][0]["venue"] == "smarkets"
+    assert snapshot["tracked_bets"][0]["legs"][1]["venue"] == "bet10"
+
+
+def test_exchange_worker_session_auto_ingests_live_bookmaker_history_and_matches_run_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-22T17:20:00Z",
+                        "source": "smarkets_exchange",
+                        "kind": "positions_snapshot",
+                        "page": "open_positions",
+                        "url": "https://smarkets.com/portfolio/?time=all&order-state=active",
+                        "document_title": "Open positions",
+                        "body_text": "Available balance £120.45 Exposure £0.00 Unrealized P/L £0.00",
+                        "interactive_snapshot": [],
+                        "links": [],
+                        "inputs": {},
+                        "visible_actions": [],
+                        "resource_hosts": [],
+                        "local_storage_keys": [],
+                        "screenshot_path": None,
+                        "notes": ["seed snapshot"],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "captured_at": "2026-03-22T17:27:58Z",
+                        "source": "smarkets_exchange",
+                        "kind": "history_snapshot",
+                        "page": "history",
+                        "url": "https://smarkets.com/portfolio/?time=all&order-state=settled",
+                        "document_title": "Settled orders",
+                        "body_text": "Settled orders",
+                        "interactive_snapshot": [],
+                        "links": [],
+                        "inputs": {},
+                        "visible_actions": [],
+                        "resource_hosts": [],
+                        "local_storage_keys": [],
+                        "screenshot_path": None,
+                        "notes": ["settled-history"],
+                        "metadata": {
+                            "smarkets_portfolio": {
+                                "extractor": "dom-v1",
+                                "groups": [],
+                                "positions": [
+                                    {
+                                        "side": "sell",
+                                        "contract": "Tottenham",
+                                        "market": "Full-time result",
+                                        "event": "Tottenham vs Atletico Madrid",
+                                        "event_status": "Event ended|Football",
+                                        "event_url": "https://smarkets.com/event/123",
+                                        "price": 3.35,
+                                        "stake": 9.91,
+                                        "liability": 23.29,
+                                        "return_amount": -23.29,
+                                        "current_value": -23.29,
+                                        "pnl_amount": -23.29,
+                                        "pnl_percent": None,
+                                        "status": "Lost",
+                                        "can_trade_out": False,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "DEFAULT_LEDGER_HISTORY_PATH",
+        tmp_path / "missing-statement-history.json",
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_live_bookmaker_history_entries",
+        lambda venues=None: {
+            "entries": [
+                {
+                    "entry_id": "live_history:bet365:tottenham",
+                    "occurred_at": "2026-03-22T17:27:58Z",
+                    "platform": "bet365",
+                    "activity_type": "bet_settled",
+                    "status": "won",
+                    "platform_kind": "sportsbook",
+                    "event": "Tottenham vs Atletico Madrid",
+                    "market": "Full-time result",
+                    "selection": "Tottenham",
+                    "bet_type": "single",
+                    "market_family": "match_odds",
+                    "funding_kind": "cash",
+                    "currency": "GBP",
+                    "stake_gbp": 10.0,
+                    "odds_decimal": 3.4,
+                    "payout_gbp": 34.0,
+                    "realised_pnl_gbp": 24.0,
+                    "source_file": "live_browser",
+                    "source_kind": "auto_live_bookmaker_history",
+                    "description": "won",
+                }
+            ],
+            "reports": [
+                {
+                    "venue": "bet365",
+                    "status": "success",
+                    "started_at": "2026-03-22T17:27:58Z",
+                    "finished_at": "2026-03-22T17:27:59Z",
+                    "summary": "bet365 history sync success (1 row(s))",
+                    "detail": "Extracted 1 settled row(s) from live history.",
+                    "rows_extracted": 1,
+                    "page": "my_bets",
+                    "url": "https://www.bet365.com/#/MB/",
+                    "document_title": "bet365 Settled Bets",
+                    "trace": [],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "_list_available_live_bookmaker_history_venues",
+        lambda: ["bet365"],
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_live_other_open_bets",
+        lambda: [],
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        capture_live=True,
+    )
+
+    assert len(snapshot["tracked_bets"]) == 1
+    assert snapshot["tracked_bets"][0]["platform"] == "bet365"
+    assert snapshot["tracked_bets"][0]["selection"] == "Tottenham"
+    assert snapshot["tracked_bets"][0]["realised_pnl_gbp"] == pytest.approx(0.71)
+
+
+def test_exchange_worker_session_auto_tracks_runtime_bookmaker_legs_when_companion_file_is_unset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text("")
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-03-22T15:05:00Z",
+                "interval_seconds": 5.0,
+                "iteration": 12,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "Watcher iteration captured 1 watch groups from 1 positions.",
+                },
+                "account_stats": None,
+                "open_positions": [
+                    {
+                        "event": "Arsenal vs Everton",
+                        "event_status": "27'|Premier League",
+                        "event_url": "https://smarkets.com/football/arsenal-vs-everton",
+                        "contract": "Draw",
+                        "market": "Full-time result",
+                        "status": "Order filled",
+                        "market_status": "tradable",
+                        "is_in_play": True,
+                        "price": 3.35,
+                        "stake": 9.91,
+                        "liability": 23.29,
+                        "current_value": 9.60,
+                        "pnl_amount": -0.31,
+                        "current_back_odds": 2.80,
+                        "current_implied_probability": 1 / 2.80,
+                        "current_implied_percentage": 100 / 2.80,
+                        "current_score": "0-0",
+                        "current_score_home": 0,
+                        "current_score_away": 0,
+                        "live_clock": "27'",
+                        "can_trade_out": True,
+                    }
+                ],
+                "other_open_bets": [],
+                "watch": {
+                    "position_count": 1,
+                    "watch_count": 1,
+                    "commission_rate": 0.0,
+                    "target_profit": 1.0,
+                    "stop_loss": 1.0,
+                    "watches": [],
+                },
+                "decision_count": 1,
+                "decisions": [{"contract": "Draw", "status": "hold"}],
+            },
+        )
+        + "\n",
+    )
+
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "load_historical_positions",
+        lambda payload_path=None: [],
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_live_other_open_bets",
+        lambda: [
+            {
+                "venue": "bet365",
+                "event": "Arsenal vs Everton",
+                "label": "Draw",
+                "market": "Match Odds",
+                "side": "back",
+                "odds": 4.2,
+                "stake": 10.0,
+                "status": "open",
+                "funding_kind": "free_bet",
+            }
+        ],
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        capture_live=True,
+    )
+
+    tracked_bets_path = run_dir / "tracked-bets.json"
+    tracked_bets_payload = json.loads(tracked_bets_path.read_text())
+
+    assert tracked_bets_path.exists()
+    assert len(tracked_bets_payload["tracked_bets"]) == 1
+    assert snapshot["tracked_bets"][0]["platform"] == "bet365"
+    assert snapshot["tracked_bets"][0]["event"] == "Arsenal vs Everton"
+    assert snapshot["tracked_bets"][0]["selection"] == "Draw"
+    assert snapshot["tracked_bets"][0]["status"] == "open"
+    assert snapshot["tracked_bets"][0]["funding_kind"] == "free_bet"
+    assert snapshot["other_open_bets"][0]["funding_kind"] == "free_bet"
+    assert {leg["venue"] for leg in snapshot["tracked_bets"][0]["legs"]} == {
+        "bet365",
+        "smarkets",
+    }
+
+
+def test_exchange_worker_session_auto_tracked_bets_settle_from_smarkets_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "smarkets-run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-03-22T16:10:26Z",
+                "source": "smarkets_exchange",
+                "kind": "history_snapshot",
+                "page": "history",
+                "url": "https://smarkets.com/portfolio/?time=all&order-state=settled",
+                "document_title": "Smarkets Predictions",
+                "body_text": "Settled orders",
+                "interactive_snapshot": [],
+                "links": [],
+                "inputs": {},
+                "visible_actions": [],
+                "resource_hosts": [],
+                "local_storage_keys": [],
+                "screenshot_path": None,
+                "notes": ["settled-history"],
+                "metadata": {
+                    "smarkets_portfolio": {
+                        "extractor": "dom-v1",
+                        "groups": [],
+                        "positions": [
+                            {
+                                "side": "sell",
+                                "contract": "Draw",
+                                "market": "Full-time result",
+                                "event": "Arsenal vs Everton",
+                                "event_status": "Event ended|Premier League",
+                                "event_url": "https://smarkets.com/football/arsenal-vs-everton",
+                                "price": 3.35,
+                                "stake": None,
+                                "liability": None,
+                                "return_amount": -23.29,
+                                "current_value": -23.29,
+                                "pnl_amount": None,
+                                "pnl_percent": None,
+                                "status": "Lost",
+                                "can_trade_out": False,
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        + "\n",
+    )
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-03-22T15:05:00Z",
+                "interval_seconds": 5.0,
+                "iteration": 12,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "Watcher iteration captured 1 watch groups from 1 positions.",
+                },
+                "account_stats": None,
+                "open_positions": [
+                    {
+                        "event": "Arsenal vs Everton",
+                        "event_status": "27'|Premier League",
+                        "event_url": "https://smarkets.com/football/arsenal-vs-everton",
+                        "contract": "Draw",
+                        "market": "Full-time result",
+                        "status": "Order filled",
+                        "market_status": "tradable",
+                        "is_in_play": True,
+                        "price": 3.35,
+                        "stake": 9.91,
+                        "liability": 23.29,
+                        "current_value": 9.60,
+                        "pnl_amount": -0.31,
+                        "current_back_odds": 2.80,
+                        "current_implied_probability": 1 / 2.80,
+                        "current_implied_percentage": 100 / 2.80,
+                        "current_score": "0-0",
+                        "current_score_home": 0,
+                        "current_score_away": 0,
+                        "live_clock": "27'",
+                        "can_trade_out": True,
+                    }
+                ],
+                "other_open_bets": [],
+                "watch": {
+                    "position_count": 1,
+                    "watch_count": 1,
+                    "commission_rate": 0.0,
+                    "target_profit": 1.0,
+                    "stop_loss": 1.0,
+                    "watches": [],
+                },
+                "decision_count": 1,
+                "decisions": [{"contract": "Draw", "status": "hold"}],
+            },
+        )
+        + "\n",
+    )
+
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "load_historical_positions",
+        lambda payload_path=None: [],
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_live_other_open_bets",
+        lambda: [
+            {
+                "venue": "bet365",
+                "event": "Arsenal vs Everton",
+                "label": "Draw",
+                "market": "Match Odds",
+                "side": "back",
+                "odds": 4.2,
+                "stake": 10.0,
+                "status": "open",
+            }
+        ],
+    )
+
+    load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        capture_live=True,
+    )
+
+    (run_dir / "watcher-state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-03-22T16:10:26Z",
+                "interval_seconds": 5.0,
+                "iteration": 13,
+                "worker": {
+                    "name": "bet-recorder",
+                    "status": "ready",
+                    "detail": "Watcher iteration captured 0 watch groups from 0 positions.",
+                },
+                "account_stats": None,
+                "open_positions": [],
+                "other_open_bets": [],
+                "watch": {
+                    "position_count": 0,
+                    "watch_count": 0,
+                    "commission_rate": 0.0,
+                    "target_profit": 1.0,
+                    "stop_loss": 1.0,
+                    "watches": [],
+                },
+                "decision_count": 0,
+                "decisions": [],
+            },
+        )
+        + "\n",
+    )
+    monkeypatch.setattr(
+        exchange_worker_module,
+        "capture_live_other_open_bets",
+        lambda: [],
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=None,
+            run_dir=run_dir,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=None,
+            commission_rate=0.0,
+            target_profit=1.0,
+            stop_loss=1.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+        capture_live=False,
+    )
+
+    assert snapshot["tracked_bets"][0]["status"] == "lost"
+    assert snapshot["tracked_bets"][0]["settled_at"] == "2026-03-22T16:10:26Z"
+    assert snapshot["tracked_bets"][0]["realised_pnl_gbp"] == pytest.approx(8.71)
+    assert snapshot["tracked_bets"][0]["payout_gbp"] == pytest.approx(18.71)
+    assert snapshot["tracked_bets"][0]["legs"][0]["status"] == "lost"
+    assert snapshot["tracked_bets"][0]["legs"][1]["status"] == "won"
+
+
 def test_load_exchange_snapshot_surfaces_watcher_error_state(
     tmp_path: Path,
 ) -> None:
@@ -2022,8 +2965,8 @@ def test_load_exchange_snapshot_supports_bet365_live_browser_payload(
     assert snapshot["worker"]["status"] == "ready"
     assert snapshot["other_open_bets"][0]["label"] == "Brumbies"
     assert snapshot["other_open_bets"][0]["odds"] == 3.1
-    assert snapshot["venues"][1]["id"] == "bet365"
-    assert snapshot["venues"][1]["status"] == "ready"
+    bet365_summary = next(venue for venue in snapshot["venues"] if venue["id"] == "bet365")
+    assert bet365_summary["status"] == "ready"
 
 
 def test_handle_worker_request_line_persists_selected_live_venue(
@@ -2094,14 +3037,14 @@ def test_handle_worker_request_line_preserves_selected_venue_after_invalid_selec
     )
 
     response, next_config, next_selected_venue = handle_worker_request_line(
-        request_line=json.dumps({"SelectVenue": {"venue": "betfair"}}),
+        request_line=json.dumps({"SelectVenue": {"venue": "not-a-real-venue"}}),
         config=config,
         selected_venue="bet365",
     )
 
     assert next_config == config
     assert next_selected_venue == "bet365"
-    assert response["request_error"] == "Unsupported venue for recorder worker: betfair"
+    assert response["request_error"] == "Unsupported venue for recorder worker: not-a-real-venue"
     assert response["snapshot"]["selected_venue"] is None
 
 
@@ -2300,6 +3243,7 @@ def test_load_exchange_snapshot_supports_added_live_bookmaker_payloads(
     assert snapshot["selected_venue"] == venue
     assert snapshot["worker"]["status"] == "ready"
     assert snapshot["other_open_bets"][0]["label"] == expected_label
+    assert "Loaded 1" in snapshot["status_line"]
 
 
 def fixture_text(name: str) -> str:

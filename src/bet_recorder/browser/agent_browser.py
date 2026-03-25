@@ -9,6 +9,7 @@ import json
 import subprocess
 
 from bet_recorder.browser.models import BrowserPageState
+from bet_recorder.capture.bets_observations import build_bets_page_metadata
 
 BODY_TEXT_JS = "document.body?.innerText ?? ''"
 LINKS_JS = (
@@ -113,20 +114,24 @@ class AgentBrowserClient:
         screenshot_path: str | None,
         notes: list[str],
     ) -> BrowserPageState:
+        url = self._get_url()
+        document_title = self._get_title()
+        local_storage = self._get_local_storage_data()
         return BrowserPageState(
             captured_at=captured_at,
             page=page,
-            url=self._get_url(),
-            document_title=self._get_title(),
+            url=url,
+            document_title=document_title,
             body_text=self._eval_result(BODY_TEXT_JS),
             interactive_snapshot=self._get_interactive_snapshot(),
             links=self._eval_result(LINKS_JS),
             inputs=self._eval_result(INPUTS_JS),
             visible_actions=self._eval_result(VISIBLE_ACTIONS_JS),
             resource_hosts=self._eval_result(RESOURCE_HOSTS_JS),
-            local_storage_keys=self._get_local_storage_keys(),
+            local_storage_keys=list(local_storage.keys()),
             screenshot_path=screenshot_path,
             notes=notes,
+            metadata=build_bets_page_metadata(url=url, local_storage=local_storage),
         )
 
     def capture_screenshot(self, output_path: Path) -> Path:
@@ -153,13 +158,13 @@ class AgentBrowserClient:
             for ref, payload in refs.items()
         ]
 
-    def _get_local_storage_keys(self) -> list[str]:
+    def _get_local_storage_data(self) -> dict[str, object]:
         try:
             response = self._run_json("storage", "local")
         except RuntimeError:
-            return []
+            return {}
         storage = response.data.get("data", {})
-        return list(storage.keys())
+        return dict(storage) if isinstance(storage, dict) else {}
 
     def _eval_result(self, script: str):
         response = self._run_json("eval", script)

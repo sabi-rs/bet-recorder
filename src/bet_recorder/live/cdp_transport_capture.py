@@ -9,6 +9,7 @@ from bet_recorder.browser.cdp import (
   list_debug_targets,
   select_debug_target,
 )
+from bet_recorder.capture.bets_observations import refresh_bets_observations
 from bet_recorder.capture.run_bundle import RunBundle
 from bet_recorder.transport.writer import append_transport_event
 
@@ -49,6 +50,11 @@ def capture_cdp_transport(
         "target_url": target.url,
       },
     )
+  refresh_bets_observations(
+    run_dir=bundle.run_dir,
+    events_path=bundle.events_path,
+    transport_path=bundle.transport_path,
+  )
   return len(events)
 
 

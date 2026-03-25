@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from bet_recorder.capture.bets_observations import refresh_bets_observations
 from bet_recorder.capture.action_snapshot import ActionSnapshot, append_action_snapshot
 from bet_recorder.capture.page_snapshot import PageSnapshot, append_page_snapshot
 from bet_recorder.capture.run_bundle import RunBundle
@@ -48,6 +49,11 @@ def record_live_page(*, source: str, bundle: RunBundle, payload: dict) -> None:
     )
   else:
     raise ValueError(f"Unsupported source: {source}")
+  refresh_bets_observations(
+    run_dir=bundle.run_dir,
+    events_path=bundle.events_path,
+    transport_path=bundle.transport_path,
+  )
 
 
 def record_live_action(*, source: str, bundle: RunBundle, payload: dict) -> None:
@@ -81,6 +87,11 @@ def record_live_transport(*, bundle: RunBundle, payload: dict) -> None:
   if bundle.transport_path is None:
     raise ValueError("Run bundle does not have transport capture enabled.")
   append_transport_event(bundle.transport_path, payload)
+  refresh_bets_observations(
+    run_dir=bundle.run_dir,
+    events_path=bundle.events_path,
+    transport_path=bundle.transport_path,
+  )
 
 
 def record_watch_plan(*, source: str, bundle: RunBundle, payload: dict) -> None:

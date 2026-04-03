@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bet_recorder.browser.models import BrowserPageState  # noqa: E402
+from bet_recorder import watcher_storage  # noqa: E402
 from bet_recorder.watcher import (  # noqa: E402
     LIVE_EVENT_SUMMARY_REFRESH_SECONDS,
     LIVE_POLL_INTERVAL_SECONDS,
@@ -347,7 +348,9 @@ def test_validate_smarkets_open_positions_payload_rejects_login_redirect() -> No
                 "document_title": "Smarkets Predictions",
                 "body_text": "Welcome back\nEmail\nPassword\nLog in\nCreate account",
                 "visible_actions": ["Log in", "Create account"],
-                "interactive_snapshot": [{"ref": "e1", "role": "button", "name": "Log in"}],
+                "interactive_snapshot": [
+                    {"ref": "e1", "role": "button", "name": "Log in"}
+                ],
             },
             config,
         )
@@ -415,10 +418,12 @@ def test_bootstrap_smarkets_page_does_not_navigate_ready_session() -> None:
 
     class FakeClient:
         def current_url(self) -> str:
-            calls.append((
-                "current_url",
-                "https://smarkets.com/portfolio/?time=all&order-state=active",
-            ))
+            calls.append(
+                (
+                    "current_url",
+                    "https://smarkets.com/portfolio/?time=all&order-state=active",
+                )
+            )
             return "https://smarkets.com/portfolio/?time=all&order-state=active"
 
         def open_url(self, url: str) -> None:
@@ -468,7 +473,9 @@ def test_build_session_diagnostics_flags_portfolio_error_overlay() -> None:
             "document_title": "Smarkets Predictions",
             "body_text": "Something went wrong\nTry Again\nWed",
             "visible_actions": ["Try Again"],
-            "interactive_snapshot": [{"ref": "e1", "role": "button", "name": "Try Again"}],
+            "interactive_snapshot": [
+                {"ref": "e1", "role": "button", "name": "Try Again"}
+            ],
         },
         WatcherConfig(
             run_dir=Path("/tmp/smarkets-run"),
@@ -507,7 +514,11 @@ def test_build_session_diagnostics_flags_login_redirect() -> None:
     assert diagnostics["open_positions_ready"] is False
 
 
-def test_load_smarkets_credentials_reads_home_dotenv(tmp_path: Path) -> None:
+def test_load_smarkets_credentials_reads_home_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SMARKETS_USERNAME", raising=False)
+    monkeypatch.delenv("SMARKETS_PASSWORD", raising=False)
     (tmp_path / ".env").write_text(
         'SMARKETS_USERNAME="user@example.com"\nSMARKETS_PASSWORD="secret"\n'
     )
@@ -519,7 +530,10 @@ def test_load_smarkets_credentials_reads_home_dotenv(tmp_path: Path) -> None:
 
 def test_ensure_smarkets_authenticated_submits_login_when_credentials_exist(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("SMARKETS_USERNAME", raising=False)
+    monkeypatch.delenv("SMARKETS_PASSWORD", raising=False)
     (tmp_path / ".env").write_text(
         'SMARKETS_USERNAME="user@example.com"\nSMARKETS_PASSWORD="secret"\n'
     )
@@ -597,7 +611,8 @@ def test_acquire_watcher_process_slot_rejects_conflicting_process(
     pid_path.write_text("123\n")
 
     monkeypatch.setattr(
-        "bet_recorder.watcher._find_conflicting_watcher_pid",
+        watcher_storage,
+        "_find_conflicting_watcher_pid",
         lambda run_dir_arg, pid_path_arg: 123,
     )
 
@@ -657,7 +672,10 @@ def test_next_poll_interval_keeps_base_cadence_for_pre_match_positions() -> None
 
 def test_ensure_smarkets_authenticated_prefers_visible_login_button_with_eval_path(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("SMARKETS_USERNAME", raising=False)
+    monkeypatch.delenv("SMARKETS_PASSWORD", raising=False)
     (tmp_path / ".env").write_text(
         'SMARKETS_USERNAME="user@example.com"\nSMARKETS_PASSWORD="secret"\n'
     )
@@ -811,7 +829,9 @@ def test_capture_current_smarkets_open_positions_retries_try_again_overlay(
             "url": "https://smarkets.com/portfolio/?order-state=active",
             "document_title": "Smarkets Predictions",
             "body_text": "Something went wrong\nTry Again\nWed",
-            "interactive_snapshot": [{"ref": "e1", "role": "button", "name": "Try Again"}],
+            "interactive_snapshot": [
+                {"ref": "e1", "role": "button", "name": "Try Again"}
+            ],
             "links": [],
             "inputs": {},
             "visible_actions": ["Try Again"],
@@ -847,7 +867,9 @@ def test_capture_current_smarkets_open_positions_retries_try_again_overlay(
 
     class FakeClient:
         def current_url(self) -> str:
-            calls.append(("current_url", "https://smarkets.com/portfolio/?order-state=active"))
+            calls.append(
+                ("current_url", "https://smarkets.com/portfolio/?order-state=active")
+            )
             return "https://smarkets.com/portfolio/?order-state=active"
 
         def open_url(self, url: str) -> None:
@@ -870,8 +892,12 @@ def test_capture_current_smarkets_open_positions_retries_try_again_overlay(
         "bet_recorder.watcher.capture_agent_browser_page_state",
         fake_capture_agent_browser_page_state,
     )
-    monkeypatch.setattr("bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None)
-    monkeypatch.setattr("bet_recorder.watcher.ensure_smarkets_activity_filter", lambda **_: None)
+    monkeypatch.setattr(
+        "bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None
+    )
+    monkeypatch.setattr(
+        "bet_recorder.watcher.ensure_smarkets_activity_filter", lambda **_: None
+    )
 
     run_dir = tmp_path / "smarkets-run"
     run_dir.mkdir()
@@ -1154,15 +1180,24 @@ def test_capture_current_smarkets_open_positions_merges_scroll_captured_rows(
             if "advanced" in script and "max_top" in script:
                 self.scroll_calls += 1
                 if self.scroll_calls == 1:
-                    return {"advanced": True, "at_end": True, "top": 720, "max_top": 720}
+                    return {
+                        "advanced": True,
+                        "at_end": True,
+                        "top": 720,
+                        "max_top": 720,
+                    }
                 return {"advanced": False, "at_end": True, "top": 720, "max_top": 720}
             return True
 
         def wait(self, milliseconds: int) -> None:
             assert milliseconds == 200
 
-    monkeypatch.setattr("bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None)
-    monkeypatch.setattr("bet_recorder.watcher.ensure_smarkets_activity_filter", lambda **_: None)
+    monkeypatch.setattr(
+        "bet_recorder.watcher.accept_smarkets_cookies", lambda *, client: None
+    )
+    monkeypatch.setattr(
+        "bet_recorder.watcher.ensure_smarkets_activity_filter", lambda **_: None
+    )
     monkeypatch.setattr(
         "bet_recorder.watcher._capture_event_summaries",
         lambda **_: [],

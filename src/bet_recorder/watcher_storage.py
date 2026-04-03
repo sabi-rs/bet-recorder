@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import errno
 import json
 import os
 
@@ -21,12 +22,27 @@ def ensure_watcher_run_dir(run_dir: Path) -> None:
 
 def acquire_watcher_process_slot(run_dir: Path) -> None:
     pid_path = run_dir / "watcher.pid"
-    conflicting_pid = _find_conflicting_watcher_pid(run_dir, pid_path)
-    if conflicting_pid is not None:
-        raise RuntimeError(
-            f"Watcher already running for {run_dir} with pid {conflicting_pid}."
-        )
-    _write_private_text(pid_path, f"{os.getpid()}\n")
+    _ensure_private_dir(run_dir)
+
+    while True:
+        try:
+            fd = os.open(pid_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            conflicting_pid = _find_conflicting_watcher_pid(run_dir, pid_path)
+            if conflicting_pid is not None:
+                raise RuntimeError(
+                    f"Watcher already running for {run_dir} with pid {conflicting_pid}."
+                )
+            pid_path.unlink(missing_ok=True)
+            continue
+        except OSError as error:
+            if error.errno == errno.EEXIST:
+                continue
+            raise
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{os.getpid()}\n")
+        _set_private_mode(pid_path, 0o600)
+        return
 
 
 def release_watcher_process_slot(run_dir: Path) -> None:
@@ -88,7 +104,9 @@ def _process_matches_run_dir(pid: int, run_dir: Path) -> bool:
     if not cmdline_path.exists():
         return False
     try:
-        command = cmdline_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", "ignore")
+        command = (
+            cmdline_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", "ignore")
+        )
     except Exception:
         return False
     return "watch-smarkets-session" in command and str(run_dir) in command

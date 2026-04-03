@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 import time
 import json
-import os
 
 from bet_recorder.analysis.smarkets_exchange import (
     parse_event_page_body_summary,
@@ -69,7 +68,6 @@ PORTFOLIO_SCROLL_CAPTURE_WAIT_MS = 200
 PORTFOLIO_SCROLL_CAPTURE_MAX_STEPS = 12
 SMARKETS_PORTFOLIO_METADATA_KEY = "smarkets_portfolio"
 SMARKETS_PORTFOLIO_EXTRACTOR_VERSION = "dom-v1"
-_find_conflicting_watcher_pid = watcher_storage._find_conflicting_watcher_pid
 
 
 def ensure_watcher_run_dir(run_dir: Path) -> None:
@@ -77,13 +75,7 @@ def ensure_watcher_run_dir(run_dir: Path) -> None:
 
 
 def acquire_watcher_process_slot(run_dir: Path) -> None:
-    pid_path = run_dir / "watcher.pid"
-    conflicting_pid = _find_conflicting_watcher_pid(run_dir, pid_path)
-    if conflicting_pid is not None:
-        raise RuntimeError(
-            f"Watcher already running for {run_dir} with pid {conflicting_pid}."
-        )
-    watcher_storage._write_private_text(pid_path, f"{os.getpid()}\n")
+    watcher_storage.acquire_watcher_process_slot(run_dir)
 
 
 def release_watcher_process_slot(run_dir: Path) -> None:
@@ -222,7 +214,9 @@ def capture_current_smarkets_open_positions(
     client = client or AgentBrowserClient(session=config.session)
     bootstrap_smarkets_page(client=client, profile_path=config.profile_path)
     ensure_smarkets_authenticated(client=client)
-    _with_navigation_retry(lambda: accept_smarkets_cookies(client=client), client=client)
+    _with_navigation_retry(
+        lambda: accept_smarkets_cookies(client=client), client=client
+    )
     _with_navigation_retry(
         lambda: ensure_smarkets_activity_filter(client=client), client=client
     )
@@ -291,13 +285,15 @@ def _capture_smarkets_open_positions_page_state(
             notes=notes,
         )
 
-    states = [_capture_structured_smarkets_portfolio_state(
-        capture_page_state=capture_page_state,
-        client=client,
-        captured_at=captured_at,
-        page="open_positions",
-        notes=notes,
-    )]
+    states = [
+        _capture_structured_smarkets_portfolio_state(
+            capture_page_state=capture_page_state,
+            client=client,
+            captured_at=captured_at,
+            page="open_positions",
+            notes=notes,
+        )
+    ]
     try:
         for _ in range(PORTFOLIO_SCROLL_CAPTURE_MAX_STEPS):
             metrics = _scroll_smarkets_portfolio_page(client=client)
@@ -767,7 +763,9 @@ def _retry_smarkets_error_overlay_capture(
     for _ in range(2):
         if not _click_smarkets_try_again(client=client):
             break
-        _with_navigation_retry(lambda: accept_smarkets_cookies(client=client), client=client)
+        _with_navigation_retry(
+            lambda: accept_smarkets_cookies(client=client), client=client
+        )
         _with_navigation_retry(
             lambda: ensure_smarkets_activity_filter(client=client), client=client
         )
@@ -840,7 +838,9 @@ def build_exchange_snapshot_from_payload(payload: dict, config: WatcherConfig) -
         if len(warnings) > 2:
             suffix = f"{suffix}; +{len(warnings) - 2} more"
         snapshot["warnings"] = warnings
-        snapshot["worker"]["detail"] = f"{snapshot['worker']['detail']} Warnings: {suffix}"
+        snapshot["worker"]["detail"] = (
+            f"{snapshot['worker']['detail']} Warnings: {suffix}"
+        )
         snapshot["status_line"] = f"{snapshot['status_line']} Warnings: {suffix}"
     return snapshot
 
@@ -929,7 +929,10 @@ def _format_session_not_ready_error(session: dict) -> str:
             + "your main browser session."
         )
     if session.get("page_hint") == "error":
-        return message + " Smarkets returned an in-app error state; retry the portfolio view."
+        return (
+            message
+            + " Smarkets returned an in-app error state; retry the portfolio view."
+        )
     return message
 
 
@@ -938,8 +941,7 @@ def _payload_has_retryable_smarkets_error(payload: dict | None) -> bool:
         return False
     body_text = str(payload.get("body_text", "") or "").lower()
     visible_actions = [
-        str(action).strip().lower()
-        for action in (payload.get("visible_actions") or [])
+        str(action).strip().lower() for action in (payload.get("visible_actions") or [])
     ]
     return "something went wrong" in body_text and "try again" in visible_actions
 
@@ -1006,11 +1008,12 @@ def _capture_event_summaries(
     for event_url, event_positions in positions_by_url.items():
         refresh_seconds = _event_summary_refresh_seconds(event_positions)
         cached_entry = cache.get(event_url) if cache is not None else None
-        if _event_summary_cache_is_fresh(
+        cache_is_fresh = _event_summary_cache_is_fresh(
             cached_entry,
             captured_at=captured_at,
             refresh_seconds=refresh_seconds,
-        ):
+        )
+        if cache_is_fresh and isinstance(cached_entry, dict):
             summary = cached_entry.get("summary")
         else:
             summary = _fetch_event_summary(

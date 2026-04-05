@@ -3048,6 +3048,43 @@ def test_handle_worker_request_line_preserves_selected_venue_after_invalid_selec
     assert response["snapshot"]["selected_venue"] is None
 
 
+def test_select_venue_does_not_capture_live_venue_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bet_recorder.exchange_worker.capture_current_live_venue_payload",
+        lambda venue: (_ for _ in ()).throw(
+            AssertionError("SelectVenue should not trigger a live capture")
+        ),
+    )
+
+    config = WorkerConfig(
+        positions_payload_path=Path("/tmp/unused-positions.json"),
+        run_dir=None,
+        account_payload_path=None,
+        open_bets_payload_path=None,
+        companion_legs_path=None,
+        commission_rate=0.0,
+        target_profit=1.0,
+        stop_loss=1.0,
+        hard_margin_call_profit_floor=None,
+        warn_only_default=True,
+        agent_browser_session=None,
+    )
+
+    response, next_config, next_selected_venue = handle_worker_request_line(
+        request_line=json.dumps({"SelectVenue": {"venue": "bet365"}}),
+        config=config,
+        selected_venue="smarkets",
+    )
+
+    assert next_config == config
+    assert next_selected_venue == "bet365"
+    assert response["snapshot"]["selected_venue"] == "bet365"
+    assert response["snapshot"]["runtime"]["refresh_kind"] == "cached"
+    assert "No cached bet365 snapshot is available." in response["snapshot"]["status_line"]
+
+
 def test_refresh_cached_reuses_cached_live_venue_snapshot(
     monkeypatch,
 ) -> None:

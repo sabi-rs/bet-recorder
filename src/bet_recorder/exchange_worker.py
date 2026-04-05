@@ -2315,10 +2315,10 @@ def handle_worker_request(
             load_exchange_snapshot_for_config(
                 resolved_config,
                 selected_venue=venue,
-                capture_live=(venue != "smarkets"),
+                capture_live=False,
                 cached_snapshot=cached_snapshot,
             ),
-            refresh_kind="live_capture" if venue != "smarkets" else "cached",
+            refresh_kind="cached",
             run_dir=resolved_config.run_dir,
         )
         if selected_venue is None:

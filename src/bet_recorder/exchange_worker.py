@@ -1002,6 +1002,66 @@ def build_unavailable_live_venue_snapshot(
     }
 
 
+def build_pending_live_venue_snapshot(
+    *,
+    venue: str,
+    config: WorkerConfig,
+) -> dict:
+    definition = LIVE_VENUE_DEFINITIONS[venue]
+    detail = (
+        f"Selected {definition.label}. No cached live snapshot is available yet. "
+        "Run a live refresh to capture the current bets surface."
+    )
+    return {
+        "worker": {
+            "name": "bet-recorder",
+            "status": "idle",
+            "detail": detail,
+        },
+        "venues": build_live_venue_summaries(
+            selected_venue=venue,
+            selected_status="awaiting_capture",
+        ),
+        "selected_venue": venue,
+        "events": [],
+        "markets": [],
+        "preflight": None,
+        "status_line": detail,
+        "runtime": {
+            "updated_at": "",
+            "source": f"{definition.source}:{definition.page}",
+            "decision_count": 0,
+            "watcher_iteration": None,
+            "stale": False,
+            "session": {
+                "name": None,
+                "current_url": "",
+                "document_title": "",
+                "page_hint": definition.page,
+                "open_positions_ready": False,
+                "validation_error": None,
+            },
+        },
+        "account_stats": None,
+        "open_positions": [],
+        "historical_positions": merge_historical_position_sources(
+            load_smarkets_history_positions(config.run_dir),
+            _load_historical_positions_for_run_dir(config.run_dir),
+        ),
+        "ledger_pnl_summary": load_ledger_pnl_summary(run_dir=config.run_dir),
+        "other_open_bets": [],
+        "decisions": [],
+        "watch": None,
+        "tracked_bets": _load_existing_tracked_bets(config),
+        "exit_policy": build_exit_policy_summary(
+            {"target_profit": 0.0, "stop_loss": 0.0},
+            hard_margin_call_profit_floor=config.hard_margin_call_profit_floor,
+            warn_only_default=config.warn_only_default,
+        ),
+        "exit_recommendations": [],
+    }
+
+
 def build_waiting_for_watcher_snapshot(*, config: WorkerConfig, detail: str) -> dict:
     return {
         "worker": {
@@ -1843,12 +1903,8 @@ def load_exchange_snapshot_for_config(
                 and cached_snapshot.get("selected_venue") == selected_venue
             ):
                 return deepcopy(cached_snapshot)
-            return build_unavailable_live_venue_snapshot(
+            return build_pending_live_venue_snapshot(
                 venue=selected_venue,
-                detail=(
-                    f"No cached {selected_venue} snapshot is available. "
-                    "Use live recapture or reselect the venue."
-                ),
                 config=config,
             )
         try:

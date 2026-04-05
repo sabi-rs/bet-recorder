@@ -1478,6 +1478,8 @@ def build_live_venue_summaries(
                         "status": (
                             "ready"
                             if selected_status in {"ready", "no_open_bets"}
+                            else "connected"
+                            if selected_status == "awaiting_capture"
                             else "error"
                         ),
                         "detail": _with_support_note(
@@ -1512,7 +1514,13 @@ def build_live_venue_summaries(
             f"Live browser tab detected: {target.title or target.url}",
         )
         if venue == selected_venue:
-            status = "ready" if selected_status in {"ready", "no_open_bets"} else "error"
+            status = (
+                "ready"
+                if selected_status in {"ready", "no_open_bets"}
+                else "connected"
+                if selected_status == "awaiting_capture"
+                else "error"
+            )
             detail = _with_support_note(
                 definition,
                 _selected_live_venue_detail(definition.label, selected_status),
@@ -1573,6 +1581,8 @@ def selected_live_venue_detail(label: str, status: str | None) -> str:
         return f"{label} open bets loaded from live browser tab"
     if status == "no_open_bets":
         return f"{label} live browser tab is connected with no open bets"
+    if status == "awaiting_capture":
+        return f"{label} is selected; run a live refresh to capture its current bets"
     if status == "navigation_required":
         return f"{label} live browser tab is connected but not on a bet history view"
     if status == "login_required":

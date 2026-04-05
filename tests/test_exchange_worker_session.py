@@ -3082,7 +3082,14 @@ def test_select_venue_does_not_capture_live_venue_immediately(
     assert next_selected_venue == "bet365"
     assert response["snapshot"]["selected_venue"] == "bet365"
     assert response["snapshot"]["runtime"]["refresh_kind"] == "cached"
-    assert "No cached bet365 snapshot is available." in response["snapshot"]["status_line"]
+    assert response["snapshot"]["worker"]["status"] == "idle"
+    assert "No cached live snapshot is available yet." in response["snapshot"]["status_line"]
+    selected_summary = next(
+        summary
+        for summary in response["snapshot"]["venues"]
+        if summary["id"] == "bet365"
+    )
+    assert selected_summary["status"] == "connected"
 
 
 def test_refresh_cached_reuses_cached_live_venue_snapshot(

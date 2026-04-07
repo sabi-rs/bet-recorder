@@ -4,4 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-exec "${ROOT_DIR}/.venv/bin/python" -m bet_recorder "$@"
+if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
+  exec "${ROOT_DIR}/.venv/bin/python" -m bet_recorder "$@"
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  exec uv run --project "${ROOT_DIR}" python -m bet_recorder "$@"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -m bet_recorder "$@"
+fi
+
+printf 'bet-recorder: no usable Python runtime found (checked .venv, uv, python3)\n' >&2
+exit 127

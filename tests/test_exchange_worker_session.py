@@ -2277,6 +2277,46 @@ def test_exchange_worker_session_merges_companion_legs_into_tracked_bets(
     assert snapshot["exit_recommendations"][0]["reason"] == "within_thresholds"
 
 
+def test_exchange_worker_session_ignores_missing_companion_legs_path(
+    tmp_path: Path,
+) -> None:
+    positions_payload_path = tmp_path / "smarkets-open-positions.json"
+    positions_payload_path.write_text(
+        json.dumps(
+            {
+                "page": "open_positions",
+                "body_text": (
+                    "Available balance £120.45 Exposure £41.63 Unrealized P/L -£0.49 "
+                    "Lazio vs Sassuolo "
+                    "Sell Draw Full-time result 3.35 £9.91 £23.29 £33.20 £9.60 -£0.31 "
+                    "(3.13%) Order filled Trade out"
+                ),
+                "inputs": {},
+                "visible_actions": ["Trade out"],
+            },
+        ),
+    )
+
+    snapshot = load_exchange_snapshot_for_config(
+        WorkerConfig(
+            positions_payload_path=positions_payload_path,
+            run_dir=None,
+            account_payload_path=None,
+            open_bets_payload_path=None,
+            companion_legs_path=tmp_path / "missing-companion-legs.json",
+            commission_rate=0.0,
+            target_profit=5.0,
+            stop_loss=5.0,
+            hard_margin_call_profit_floor=None,
+            warn_only_default=True,
+            agent_browser_session=None,
+        ),
+    )
+
+    assert snapshot["open_positions"][0]["contract"] == "Draw"
+    assert snapshot["tracked_bets"] == []
+
+
 def test_exchange_worker_session_auto_backfills_tracked_bets_from_default_ledger_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

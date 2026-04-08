@@ -12,9 +12,7 @@ from bet_recorder.browser.cdp import (
 )
 
 
-DEFAULT_BLACKJACK_STRATEGY_ROOT = (
-    Path(__file__).resolve().parents[3] / "blackjack-strategy"
-)
+DEFAULT_BLACKJACK_STRATEGY_ROOT = None
 DEFAULT_STRATEGY_COMPLEXITY = "advanced"
 FACE_DOWN_CARD_CODE = "001"
 DEFAULT_BLACKJACK_FRAME_FRAGMENT = "blackjack"
@@ -135,6 +133,11 @@ def recommend_blackjack_move(
     strategy_complexity: str = DEFAULT_STRATEGY_COMPLEXITY,
     rules: dict | None = None,
 ) -> BlackjackAdvice:
+    if blackjack_strategy_root is None:
+        raise ValueError(
+            "blackjack_strategy_root is required. "
+            "Please provide a valid path to the blackjack-strategy module."
+        )
     script = """
 const blackjackStrategy = require(process.argv[1]);
 const playerCards = JSON.parse(process.argv[2]);
@@ -190,6 +193,11 @@ def capture_blackjack_advice(
     frame_url_fragment: str = DEFAULT_BLACKJACK_FRAME_FRAGMENT,
     rules: dict | None = None,
 ) -> tuple[BlackjackSnapshot | None, BlackjackAdvice | None]:
+    if blackjack_strategy_root is None:
+        raise ValueError(
+            "blackjack_strategy_root is required. "
+            "Please provide a valid path to the blackjack-strategy module."
+        )
     snapshot = capture_blackjack_snapshot(
         debug_base_url=debug_base_url,
         target_url_fragment=target_url_fragment,

@@ -126,11 +126,25 @@ def test_recommend_blackjack_move_uses_local_blackjack_strategy(
         player_card_codes=["8S", "8D"],
         dealer_card_codes=["AC"],
     )
+
+    expected_script = """const blackjackStrategy = require(process.argv[1]);
+const playerCards = JSON.parse(process.argv[2]);
+const dealerCard = Number(process.argv[3]);
+const rules = JSON.parse(process.argv[6]);
+const action = blackjackStrategy.GetRecommendedPlayerAction(
+  playerCards,
+  dealerCard,
+  Number(process.argv[4]),
+  true,
+  { ...rules, strategyComplexity: process.argv[5] },
+);
+process.stdout.write(JSON.stringify({ action }));"""
+
     assert calls == [
         [
             "node",
             "-e",
-            calls[0][2],
+            expected_script,
             "/tmp/blackjack-strategy",
             "[8,8]",
             "1",

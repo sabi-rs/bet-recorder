@@ -591,7 +591,8 @@ async def _resolve_default_frame_execution_context(
             if context_id is not None:
                 break
         except ValueError:
-            pass
+            # Frame/context may not be available yet; retry until max_retries.
+            continue
         if attempt < max_retries - 1:
             await asyncio.sleep(retry_delay)
     if context_id is None:

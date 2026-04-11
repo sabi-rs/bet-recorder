@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import asyncio
 import json
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 JsonFetcher = Callable[[str], str]
@@ -795,5 +796,8 @@ def _build_click_labels_expression(*, labels: Sequence[str]) -> str:
 
 
 def _fetch_text(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
     with urlopen(url) as response:
         return response.read().decode("utf-8")

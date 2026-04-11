@@ -580,20 +580,21 @@ async def _resolve_default_frame_execution_context(
             websocket=websocket,
             command_id=95,
         )
+        page_events.extend(frame_tree_events)
         try:
             frame_id = _select_frame_id_by_fragments(
                 frame_tree=frame_tree_payload.get("result", {}).get("frameTree", {}),
                 url_fragments=lowered_fragments,
             )
             context_id = _select_default_execution_context_id(
-                events=[*runtime_events, *page_events, *frame_tree_events],
+                events=[*runtime_events, *page_events],
                 frame_id=frame_id,
             )
             if context_id is not None:
                 break
         except ValueError:
             # Frame/context may not be available yet; retry until max_retries.
-            continue
+            pass
         if attempt < max_retries - 1:
             await asyncio.sleep(retry_delay)
     if context_id is None:
@@ -799,5 +800,5 @@ def _fetch_text(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https'):
         raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
-    with urlopen(url) as response:
+    with urlopen(url, timeout=DEFAULT_EVALUATE_TIMEOUT_SECONDS) as response:
         return response.read().decode("utf-8")

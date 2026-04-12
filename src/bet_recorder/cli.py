@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 import sys
+import time
 
 import typer
 
@@ -17,6 +18,15 @@ from bet_recorder.browser.cdp import DEFAULT_DEBUG_BASE_URL
 from bet_recorder.analysis.bet365 import analyze_bet365_page
 from bet_recorder.analysis.betuk import analyze_betuk_page
 from bet_recorder.analysis.betway_uk import analyze_betway_page
+from bet_recorder.blackjack_assistant import (
+    DEFAULT_BLACKJACK_STRATEGY_ROOT,
+    BlackjackAdvice,
+    BlackjackSnapshot,
+    build_blackjack_rule_options,
+    capture_blackjack_advice,
+    format_blackjack_notification,
+    render_blackjack_screen,
+)
 from bet_recorder.analysis.generic_sportsbooks import (
     analyze_bet600_page,
     analyze_betfred_page,
@@ -84,6 +94,115 @@ def cli(ctx: typer.Context) -> None:
 def capture() -> None:
     """Show the default capture directory."""
     typer.echo(default_data_dir())
+
+
+@app.command("blackjack-assist")
+def blackjack_assist(
+    debug_base_url: str = typer.Option(DEFAULT_DEBUG_BASE_URL),
+    target_url_fragment: str | None = typer.Option(None),
+    frame_url_fragment: str = typer.Option("blackjack"),
+    strategy_complexity: str = typer.Option("advanced"),
+    blackjack_strategy_root: Path = typer.Option(DEFAULT_BLACKJACK_STRATEGY_ROOT),
+    number_of_decks: int = typer.Option(6),
+    hit_soft_17: bool = typer.Option(True, "--hit-soft-17/--stand-soft-17"),
+    surrender: str = typer.Option("late"),
+    double: str = typer.Option("any"),
+    double_after_split: bool = typer.Option(
+        True,
+        "--double-after-split/--no-double-after-split",
+    ),
+    resplit_aces: bool = typer.Option(False, "--resplit-aces/--no-resplit-aces"),
+    offer_insurance: bool = typer.Option(
+        True,
+        "--offer-insurance/--no-offer-insurance",
+    ),
+    max_split_hands: int = typer.Option(4),
+    json_output: bool = typer.Option(False, "--json"),
+    watch: bool = typer.Option(False),
+    interval_seconds: float = typer.Option(1.0),
+    notify: bool = typer.Option(True, "--notify/--no-notify"),
+) -> None:
+    """Read the live blackjack table from Chrome CDP and suggest the best move."""
+
+    if json_output and watch:
+        raise typer.BadParameter("--json cannot be combined with --watch")
+    if interval_seconds <= 0:
+        raise typer.BadParameter("--interval-seconds must be greater than zero")
+
+    rules = build_blackjack_rule_options(
+        number_of_decks=number_of_decks,
+        hit_soft_17=hit_soft_17,
+        surrender=surrender,
+        double=double,
+        double_after_split=double_after_split,
+        resplit_aces=resplit_aces,
+        offer_insurance=offer_insurance,
+        max_split_hands=max_split_hands,
+    )
+
+    def capture_once() -> tuple[BlackjackSnapshot | None, BlackjackAdvice | None]:
+        return capture_blackjack_advice(
+            debug_base_url=debug_base_url,
+            blackjack_strategy_root=blackjack_strategy_root,
+            strategy_complexity=strategy_complexity,
+            target_url_fragment=target_url_fragment,
+            frame_url_fragment=frame_url_fragment,
+            rules=rules,
+        )
+
+    def render_once(snapshot, advice) -> tuple[dict | None, str | None]:
+        if json_output:
+            if snapshot is None or advice is None:
+                return {"active_hand": False}, None
+            payload = advice.to_payload()
+            payload["active_hand"] = True
+            payload["game_state"] = snapshot.game_state
+            payload["target_url"] = snapshot.target_url
+            payload["frame_url"] = snapshot.frame_url
+            payload["available_actions"] = snapshot.available_actions
+            return payload, None
+        return None, render_blackjack_screen(
+            snapshot=snapshot,
+            advice=advice,
+            debug_base_url=debug_base_url,
+        )
+
+    try:
+        if watch:
+            last_notification: str | None = None
+            while True:
+                snapshot, advice = capture_once()
+                payload, screen = render_once(snapshot, advice)
+                if notify:
+                    current_notification = None
+                    if snapshot is not None and advice is not None:
+                        current_notification = format_blackjack_notification(
+                            snapshot=snapshot,
+                            advice=advice,
+                        )
+                    if (
+                        current_notification
+                        and current_notification != last_notification
+                    ):
+                        typer.echo(
+                            f"\a[{datetime.now().isoformat(timespec='seconds')}] {current_notification}",
+                            err=True,
+                        )
+                    last_notification = current_notification
+                typer.echo("\x1b[2J\x1b[H" + (screen or ""), nl=False)
+                time.sleep(interval_seconds)
+        snapshot, advice = capture_once()
+        payload, screen = render_once(snapshot, advice)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=0)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if payload is not None:
+        typer.echo(json.dumps(payload))
+        return
+    typer.echo(screen or "")
 
 
 @app.command("extract-page")

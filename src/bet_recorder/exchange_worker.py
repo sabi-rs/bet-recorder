@@ -139,7 +139,7 @@ def capture_live_horse_market_snapshot(query: dict) -> dict:
 
 def _load_existing_tracked_bets(config: WorkerConfig) -> list[dict]:
     if config.companion_legs_path is not None:
-        return load_tracked_bets(config.companion_legs_path)
+        return _load_companion_legs_tracked_bets(config.companion_legs_path)
 
     tracked_bets: list[dict] = []
     tracked_bets_path = auto_tracked_bets_path(config.run_dir)
@@ -167,7 +167,7 @@ def _sync_tracked_bets_for_snapshot(
     commission_rate: float,
 ) -> list[dict]:
     if config.companion_legs_path is not None:
-        return load_tracked_bets(config.companion_legs_path)
+        return _load_companion_legs_tracked_bets(config.companion_legs_path)
 
     tracked_bets_path = auto_tracked_bets_path(config.run_dir)
     if tracked_bets_path is None:
@@ -189,6 +189,12 @@ def _sync_tracked_bets_for_snapshot(
             updated_at=captured_at or datetime.now(UTC).isoformat(),
         )
     return _load_existing_tracked_bets(config)
+
+
+def _load_companion_legs_tracked_bets(path: Path | None) -> list[dict]:
+    if path is None or not path.exists():
+        return []
+    return load_tracked_bets(path)
 
 
 def _merge_existing_and_backfilled_tracked_bets(
